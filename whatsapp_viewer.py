@@ -699,14 +699,40 @@ HTML_UI = """<!DOCTYPE html>
       if (!text) return false;
       const t = text.trim();
       if (t.startsWith('data:image') || t.includes('/9j/')) return true;
-      if (t.length > 40 && !/\\s/.test(t) && /^[-A-Za-z0-9+/=_*&\"'()%:;$^]+$/.test(t)) return true;
+      if (/^[0-9a-zA-Z._+-]+@(s\.whatsapp\.net|lid|g\.us|c\.us|broadcast|newsletter)$/i.test(t)) return true;
+      if (/@(s\.whatsapp\.net|lid|g\.us|c\.us|broadcast)\b/i.test(t) && !t.includes(' ')) return true;
+      if (t.length > 35 && !/\\s/.test(t) && /^[-A-Za-z0-9+/=_*&\"'()%:;$^]+$/.test(t)) return true;
       return false;
     }
 
     function cleanText(text) {
       if (!text) return '';
       if (isBinaryOrBase64(text)) return '';
-      return text.replace(/\\ufffd/g, '').replace(/[\\x00-\\x08\\x0b\\x0c\\x0e-\\x1f\\x7f]/g, '').trim();
+      let t = text.replace(/\\ufffd/g, '').replace(/[\\x00-\\x08\\x0b\\x0c\\x0e-\\x1f\\x7f]/g, '').trim();
+      // Limpiar prefijos residuales de cabeceras Protobuf (ej. "a\\n9Ya en la camita!" o "r\\nJAcá todo")
+      t = t.replace(/^[A-Za-z0-9]{1,2}\\r?\\n[0-9!-/:-@\\[-`{-~](?=[A-Za-zÁÉÍÓÚáéíóúÑñ¿¡"'\\uD800-\\uDBFF])/u, '');
+      t = t.replace(/^[A-Za-z0-9]{1,2}\\r?\\n[A-Za-z](?=[A-ZÁÉÍÓÚÑ¿¡][a-záéíóúñ])/u, '');
+      if (isBinaryOrBase64(t)) return '';
+      return t.trim();
+    }
+
+    function formatLocalDate(ts, fallbackStr) {
+      if (ts) {
+        const d = new Date(ts * 1000);
+        const yyyy = d.getFullYear();
+        const mm = String(d.getMonth() + 1).padStart(2, '0');
+        const dd = String(d.getDate()).padStart(2, '0');
+        return `${yyyy}-${mm}-${dd}`;
+      }
+      return fallbackStr ? fallbackStr.split(' ')[0] : 'Desconocida';
+    }
+
+    function formatLocalTime(ts, fallbackStr) {
+      if (ts) {
+        const d = new Date(ts * 1000);
+        return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+      }
+      return fallbackStr && fallbackStr.includes(' ') ? fallbackStr.split(' ')[1].substring(0, 5) : '';
     }
 
     function formatFriendlyName(name, jid) {
@@ -746,12 +772,18 @@ HTML_UI = """<!DOCTYPE html>
       try {
         const res = await fetch('/api/sync/status');
         const data = await res.json();
+        const prevLastTs = lastSyncData.last_timestamp;
+        const prevTotalMsgs = lastSyncData.total_messages;
         lastSyncData = data;
         document.getElementById('syncStatusText').textContent = `${data.total_messages.toLocaleString()} msgs`;
         document.getElementById('dbStatsText').textContent = 
           `Base de datos: ${data.total_messages.toLocaleString()} mensajes | ${data.total_chats} chats | ${data.downloaded_media || 0} archivos multimedia (${data.pending_media || 0} en cola)`;
         if (document.getElementById('media-modal').style.display === 'flex') {
           renderMediaStats(data);
+        }
+        // Si llegaron nuevos mensajes durante la sincronización en segundo plano, reordenar la lista de chats automáticamente
+        if (prevLastTs !== undefined && (data.last_timestamp !== prevLastTs || data.total_messages !== prevTotalMsgs)) {
+          await loadChats();
         }
       } catch (e) {
         document.getElementById('syncStatusText').textContent = 'Desconectado';
@@ -967,7 +999,17 @@ HTML_UI = """<!DOCTYPE html>
       const fragment = document.createDocumentFragment();
 
       visibleMessages.forEach(m => {
-        const msgDate = m.fecha_utc ? m.fecha_utc.split(' ')[0] : 'Desconocida';
+        if (['e2e_notification', 'notification_template', 'gp2', 'protocol', 'ciphertext'].includes(m.tipo)) {
+          return;
+        }
+        const cleanBody = cleanText(m.contenido);
+        const hasMedia = Boolean(m.archivo_local || m.estado_multimedia === 'expirado' || (m.thumbnail && m.thumbnail.startsWith('data:image')));
+        if (!cleanBody && !hasMedia && !m.quoted_body) {
+          // Si es un mensaje cuyo contenido era un JID o basura cifrada aún pendiente de re-sincronizar
+          return;
+        }
+
+        const msgDate = formatLocalDate(m.timestamp, m.fecha_utc);
         if (msgDate !== lastDate) {
           const dateDiv = document.createElement('div');
           dateDiv.className = 'date-badge';
@@ -1023,9 +1065,8 @@ HTML_UI = """<!DOCTYPE html>
           mediaHtml = `<div class="media-container"><img class="media-img" src="${m.thumbnail}" onclick="openModal(this.src)"></div>`;
         }
 
-        const timeStr = m.fecha_utc ? m.fecha_utc.split(' ')[1].substring(0, 5) : '';
+        const timeStr = formatLocalTime(m.timestamp, m.fecha_utc);
         const checkHtml = isMine ? '<span class="msg-check">✓✓</span>' : '';
-        const cleanBody = cleanText(m.contenido);
 
         bubble.innerHTML = `
           ${senderHtml}
@@ -1468,19 +1509,30 @@ class BackupServerHandler(BaseHTTPRequestHandler):
                     timestamp AS last_ts,
                     ROW_NUMBER() OVER (PARTITION BY chat_id ORDER BY timestamp DESC) AS rn
                 FROM mensajes
-                WHERE chat_id IS NOT NULL AND chat_id != 'status@broadcast'
+                WHERE chat_id IS NOT NULL 
+                  AND chat_id != 'status@broadcast'
+                  AND tipo NOT IN ('e2e_notification', 'notification_template', 'gp2', 'protocol', 'ciphertext', 'call_log', 'biz_content_placeholder')
             )
             SELECT 
                 lm.chat_id,
-                COALESCE(c.nombre, ct.nombre, ct.push_name, lm.chat_id) AS display_name,
+                COALESCE(
+                    NULLIF(c.nombre, lm.chat_id),
+                    ct.nombre,
+                    ct_num.nombre,
+                    ct.push_name,
+                    ct_num.push_name,
+                    c.nombre,
+                    lm.chat_id
+                ) AS display_name,
                 lm.last_msg,
                 lm.last_tipo,
-                lm.last_ts
+                COALESCE(c.ultimo_timestamp, lm.last_ts) AS last_ts
             FROM latest_msgs lm
             LEFT JOIN chats c ON lm.chat_id = c.chat_id
             LEFT JOIN contactos ct ON lm.chat_id = ct.contact_id
+            LEFT JOIN contactos ct_num ON REPLACE(lm.chat_id, '@c.us', '@s.whatsapp.net') = ct_num.contact_id
             WHERE lm.rn = 1
-            ORDER BY lm.last_ts DESC
+            ORDER BY COALESCE(c.ultimo_timestamp, lm.last_ts) DESC
             """
             cur.execute(query)
             chats = [dict(row) for row in cur.fetchall()]
@@ -1515,11 +1567,13 @@ class BackupServerHandler(BaseHTTPRequestHandler):
                 m.quoted_msg_id,
                 m.quoted_author,
                 m.quoted_body,
-                COALESCE(ct.nombre, ct.push_name, m.remitente) AS remitente_nombre,
+                COALESCE(ct.nombre, ct_num.nombre, ct.push_name, ct_num.push_name, m.remitente) AS remitente_nombre,
                 m.remitente AS remitente_jid
             FROM mensajes m
             LEFT JOIN contactos ct ON m.remitente = ct.contact_id
+            LEFT JOIN contactos ct_num ON REPLACE(m.remitente, '@c.us', '@s.whatsapp.net') = ct_num.contact_id
             WHERE m.chat_id = ?
+              AND m.tipo NOT IN ('e2e_notification', 'notification_template', 'gp2', 'protocol', 'ciphertext', 'biz_content_placeholder')
             ORDER BY m.timestamp ASC
             """
             cur.execute(query, (chat_id,))

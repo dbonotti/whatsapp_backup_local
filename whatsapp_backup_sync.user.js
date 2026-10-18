@@ -99,11 +99,119 @@
     });
   }
 
+  function readVarint(bytes, pos) {
+    let val = 0;
+    let shift = 0;
+    while (pos < bytes.length) {
+      const b = bytes[pos++];
+      val += (b & 0x7f) * Math.pow(2, shift);
+      if ((b & 0x80) === 0) return { val, pos };
+      shift += 7;
+      if (shift > 56) return null;
+    }
+    return null;
+  }
+
+  function isGarbageString(s) {
+    if (!s) return true;
+    const t = s.trim();
+    if (!t) return true;
+    if (/^[0-9a-zA-Z._+-]+@(s\.whatsapp\.net|lid|g\.us|c\.us|broadcast|newsletter)$/i.test(t)) return true;
+    if (/@(s\.whatsapp\.net|lid|g\.us|c\.us|broadcast)\b/i.test(t) && !t.includes(" ")) return true;
+    if (/^[0-9A-F]{16,64}$/i.test(t)) return true;
+    if (/^(image|video|audio|application|text)\/[a-z0-9.+-]+(;.*)?$/i.test(t)) return true;
+    if (t.startsWith("https://mmg.whatsapp.net") || t.startsWith("/v/t62.") || t.startsWith("/mms/")) return true;
+    if (t.startsWith("data:image") || t.includes("/9j/")) return true;
+    if (t.length > 35 && !/\s/.test(t) && /^[A-Za-z0-9+/=_-]+$/.test(t)) return true;
+
+    let naturalChars = 0;
+    let weirdChars = 0;
+    for (let i = 0; i < t.length; i++) {
+      const code = t.charCodeAt(i);
+      if (
+        (code >= 65 && code <= 90) ||
+        (code >= 97 && code <= 122) ||
+        (code >= 48 && code <= 57) ||
+        code === 32 || code === 10 || code === 13 ||
+        ".,;:!?¿¡()[]{}-\"'/@#$%&*+=_~<>|".includes(t[i]) ||
+        (code >= 0x00C0 && code <= 0x017F) ||
+        (code >= 0x2000 && code <= 0x206F) ||
+        (code >= 0xD800 && code <= 0xDFFF) ||
+        (code >= 0x2600 && code <= 0x27BF)
+      ) {
+        naturalChars++;
+      } else {
+        weirdChars++;
+      }
+    }
+    if (weirdChars > 0 && weirdChars / t.length > 0.2) return true;
+    return false;
+  }
+
+  function extractProtobufStrings(bytes, depth = 0) {
+    if (depth > 5 || !bytes || bytes.length === 0) return [];
+    const candidates = [];
+    let pos = 0;
+
+    while (pos < bytes.length) {
+      const tagRes = readVarint(bytes, pos);
+      if (!tagRes || tagRes.val <= 0) break;
+      pos = tagRes.pos;
+
+      const wireType = tagRes.val & 7;
+      const fieldNum = Math.floor(tagRes.val / 8);
+      if (fieldNum <= 0 || fieldNum > 5000) break;
+
+      if (wireType === 0) {
+        const v = readVarint(bytes, pos);
+        if (!v) break;
+        pos = v.pos;
+      } else if (wireType === 1) {
+        pos += 8;
+        if (pos > bytes.length) break;
+      } else if (wireType === 5) {
+        pos += 4;
+        if (pos > bytes.length) break;
+      } else if (wireType === 2) {
+        const lenRes = readVarint(bytes, pos);
+        if (!lenRes || lenRes.val < 0 || lenRes.pos + lenRes.val > bytes.length) break;
+        const sub = bytes.subarray(lenRes.pos, lenRes.pos + lenRes.val);
+        pos = lenRes.pos + lenRes.val;
+
+        if (sub.length > 0) {
+          try {
+            const str = new TextDecoder("utf-8", { fatal: true }).decode(sub);
+            if (!/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(str)) {
+              const cleaned = str.trim();
+              if (cleaned && !isGarbageString(cleaned)) {
+                const bonus = (fieldNum === 1 || fieldNum === 2 || fieldNum === 6) ? 1000 : 0;
+                candidates.push({ text: cleaned, score: cleaned.length + bonus });
+              }
+            }
+          } catch (e) {}
+
+          const nested = extractProtobufStrings(sub, depth + 1);
+          for (const item of nested) {
+            candidates.push(item);
+          }
+        }
+      } else {
+        break;
+      }
+    }
+    return candidates;
+  }
+
   function extractTextFromBuffer(buffer) {
     const bytes = new Uint8Array(buffer);
+    const protoCandidates = extractProtobufStrings(bytes, 0);
+    if (protoCandidates.length > 0) {
+      protoCandidates.sort((a, b) => b.score - a.score);
+      return protoCandidates[0].text;
+    }
+
     const valid = [];
     let cur = [];
-
     for (let i = 0; i < bytes.length; i++) {
       const b = bytes[i];
       if ((b >= 32 && b <= 126) || b === 9 || b === 10 || b === 13 || (b >= 128 && b <= 255)) {
@@ -111,22 +219,13 @@
       } else {
         if (cur.length >= 2) {
           try {
-            const s = new TextDecoder("utf-8", { fatal: false }).decode(new Uint8Array(cur)).replace(/\ufffd/g, "").trim();
-            if (s.length >= 2 && !/^[0-9a-f]{20,}$/i.test(s) && !/^[A-Za-z0-9+/=]{40,}$/.test(s)) {
-              valid.push(s);
-            }
+            let s = new TextDecoder("utf-8", { fatal: true }).decode(new Uint8Array(cur)).trim();
+            s = s.replace(/^[a-zA-Z0-9]{1,2}\r?\n[\x20-\x7e]/, "").trim();
+            if (s.length >= 2 && !isGarbageString(s)) valid.push(s);
           } catch (e) {}
         }
         cur = [];
       }
-    }
-    if (cur.length >= 2) {
-      try {
-        const s = new TextDecoder("utf-8", { fatal: false }).decode(new Uint8Array(cur)).replace(/\ufffd/g, "").trim();
-        if (s.length >= 2 && !/^[0-9a-f]{20,}$/i.test(s) && !/^[A-Za-z0-9+/=]{40,}$/.test(s)) {
-          valid.push(s);
-        }
-      } catch (e) {}
     }
     if (valid.length === 0) return "";
     valid.sort((a, b) => b.length - a.length);

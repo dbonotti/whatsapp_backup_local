@@ -233,6 +233,19 @@ def extract_base64_jpeg(text):
         return text.strip()
     return None
 
+def clean_protobuf_text(text):
+    """Limpia prefijos residuales de cabeceras Protobuf (ej. 'a\\n9Texto' o 'r\\nJTexto')."""
+    if not text or not isinstance(text, str):
+        return ""
+    t = text.replace("\ufffd", "")
+    t = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', t).strip()
+    # Si empieza con 1-2 caracteres ASCII + salto de línea + 1 byte de longitud ASCII pegado al texto real:
+    # Caso 1: el byte de longitud es dígito/símbolo seguido de letra/emoji/signo (ej. "a\n9Ya en la camita!", "I\n!Muy buenas", "S\n+Nos quedamos")
+    t = re.sub(r'^[A-Za-z0-9]{1,2}\r?\n[0-9!-/:-@\[-`{-~](?=[A-Za-zÁÉÍÓÚáéíóúÑñ¿¡"\'\U00010000-\U0010ffff])', '', t)
+    # Caso 2: el byte de longitud es una letra (ej. 'J' = 74 bytes, 'M' = 77 bytes) seguida inmediatamente de mayúscula + minúscula (ej. "r\nJAcá todo", "u\nMSe va")
+    t = re.sub(r'^[A-Za-z0-9]{1,2}\r?\n[A-Za-z](?=[A-ZÁÉÍÓÚÑ¿¡][a-záéíóúñ])', '', t)
+    return t.strip()
+
 def is_binary_or_base64_content(tipo, text):
     if not text or not isinstance(text, str):
         return True
@@ -244,25 +257,54 @@ def is_binary_or_base64_content(tipo, text):
     if "/9j/" in t or t.startswith("data:image"):
         return True
 
-    # 2. Cadena base64 larga sin espacios
-    if len(t) > 40 and " " not in t and re.match(r'^[A-Za-z0-9+/=_\-\*\&\"\'\(\)\%\;\:\$\^]+$', t):
+    # 2. Identificadores JID de WhatsApp filtrados como texto (ej. "258741781934082@lid")
+    if re.match(r'^[0-9a-zA-Z._+\-]+@(s\.whatsapp\.net|lid|g\.us|c\.us|broadcast|newsletter)$', t, re.IGNORECASE):
+        return True
+    if any(domain in t for domain in ("@s.whatsapp.net", "@lid", "@g.us", "@c.us")) and " " not in t:
         return True
 
-    # 3. Audio / PTT: JIDs filtrados o ruido binario
+    # 3. Cadena base64 o hash hexadecimal largo sin espacios
+    if len(t) > 35 and " " not in t and re.match(r'^[A-Za-z0-9+/=_\-\*\&\"\'\(\)\%\;\:\$\^]+$', t):
+        return True
+
+    # 4. Ruido binario / claves cifradas decodificadas como texto (ej. ']X0lH͎y)M⌢a"' o '>GpJΕprȇ]Ԁa')
+    weird_chars = 0
+    for ch in t:
+        code = ord(ch)
+        if not (
+            (65 <= code <= 90) or
+            (97 <= code <= 122) or
+            (48 <= code <= 57) or
+            code in (32, 9, 10, 13) or
+            ch in ".,;:!?¿¡()[]{}-\"'/@#$%&*+=_~<>|°ºª€$" or
+            (0x00C0 <= code <= 0x017F) or  # Acentos latinos y ñ
+            (0x2000 <= code <= 0x206F) or  # Puntuación general
+            (0x2600 <= code <= 0x27BF) or  # Símbolos / emojis comunes
+            (0xFE00 <= code <= 0xFE0F) or  # Variation selectors
+            (0x1F000 <= code <= 0x1FAFF)   # Emojis Unicode suplementarios
+        ):
+            weird_chars += 1
+
+    if len(t) > 0 and (weird_chars / len(t)) > 0.18:
+        return True
+    if " " not in t and len(t) >= 6 and weird_chars >= 1:
+        return True
+
+    # 5. Audio / PTT: JIDs filtrados o ruido binario
     if tipo in ("audio", "ptt"):
         if any(domain in t for domain in ("@s.whatsapp.net", "@lid", "@g.us", "@c.us")):
             return True
         if not re.search(r'[a-zA-ZáéíóúÁÉÍÓÚñÑ]{3,}', t):
             return True
 
-    # 4. Stickers
+    # 6. Stickers
     if tipo == "sticker":
         if any(domain in t for domain in ("@s.whatsapp.net", "@lid", "@g.us", "@c.us")):
             return True
         if len(t) <= 15 and " " not in t:
             return True
 
-    # 5. Documentos con identificadores internos
+    # 7. Documentos con identificadores internos
     if tipo == "document" and len(t) > 50 and " " not in t and re.match(r'^[A-Za-z0-9_\-]+$', t):
         return True
 
@@ -324,6 +366,11 @@ def save_incremental_sync(data, db_path=DB_FILE):
         if not mid:
             continue
 
+        m_type = m.get("type", "chat")
+        # Ignorar mensajes internos de sistema/plantillas vacías de WhatsApp
+        if m_type in ("e2e_notification", "notification_template", "gp2", "protocol", "ciphertext"):
+            continue
+
         mid_str = str(mid) if mid else ""
         is_mine = 1 if (
             m.get("fromMe") in (True, "true", "True", 1, "1") or 
@@ -353,16 +400,16 @@ def save_incremental_sync(data, db_path=DB_FILE):
         dt_str = None
         if ts and isinstance(ts, (int, float)):
             try:
-                dt_str = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+                # Guardar en hora local del equipo (ej. Argentina UTC-3) para coincidir con WhatsApp Web
+                dt_str = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
             except Exception:
                 pass
 
-        m_type = m.get("type", "chat")
-        raw_body = m.get("body") or ""
-        caption = m.get("caption") or ""
+        raw_body = clean_protobuf_text(m.get("body") or "")
+        caption = clean_protobuf_text(m.get("caption") or "")
 
         # Detección y rescate de miniatura JPEG
-        extracted_thumb = extract_base64_jpeg(raw_body) or extract_base64_jpeg(caption)
+        extracted_thumb = extract_base64_jpeg(m.get("body") or "") or extract_base64_jpeg(m.get("caption") or "")
 
         # Determinar texto legítimo sin binarios
         if m_type in ("image", "video", "sticker", "audio", "ptt", "document"):
@@ -376,15 +423,10 @@ def save_incremental_sync(data, db_path=DB_FILE):
             cand = raw_body or caption
             body = "" if is_binary_or_base64_content(m_type, cand) else cand
 
-        # Limpieza de texto unicode y caracteres de control
-        if body:
-            body = body.replace("\ufffd", "")
-            body = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', body).strip()
-
         # Citas / respuestas (quotedMsg)
         quoted_msg_id = extract_id(m.get("quotedMsgId") or m.get("quotedStanzaID"))
         quoted_author = extract_id(m.get("quotedParticipant") or m.get("quotedAuthor"))
-        quoted_body = m.get("quotedBody") or ""
+        quoted_body = clean_protobuf_text(m.get("quotedBody") or "")
         if quoted_body and is_binary_or_base64_content("chat", quoted_body):
             quoted_body = ""
 
@@ -404,9 +446,18 @@ def save_incremental_sync(data, db_path=DB_FILE):
         has_media = bool(media_key and direct_path)
         estado_media = "pendiente" if has_media else "none"
 
-        # Asegurar que el chat padre exista en la tabla chats
+        # Asegurar que el chat padre exista en la tabla chats (con nombre NULL si no se conoce aún)
         if chat_id:
-            cur.execute("INSERT OR IGNORE INTO chats (chat_id, nombre) VALUES (?, ?)", (chat_id, chat_id))
+            cur.execute("""
+                INSERT INTO chats (chat_id, nombre, ultimo_timestamp)
+                VALUES (?, NULL, ?)
+                ON CONFLICT(chat_id) DO UPDATE SET
+                    ultimo_timestamp = CASE
+                        WHEN excluded.ultimo_timestamp IS NOT NULL AND (chats.ultimo_timestamp IS NULL OR excluded.ultimo_timestamp > chats.ultimo_timestamp)
+                        THEN excluded.ultimo_timestamp
+                        ELSE chats.ultimo_timestamp
+                    END
+            """, (chat_id, ts if m_type != "call_log" else None))
 
         # Inserción de mensaje
         cur.execute("""

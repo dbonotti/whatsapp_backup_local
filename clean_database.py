@@ -1,10 +1,20 @@
 import re
+from datetime import datetime
 import db_manager
-from db_manager import extract_base64_jpeg, is_binary_or_base64_content
+from db_manager import extract_base64_jpeg, is_binary_or_base64_content, clean_protobuf_text
 
 def clean_database():
     conn = db_manager.get_connection()
     cur = conn.cursor()
+
+    print("0. Eliminando notificaciones internas de sistema vacías...")
+    cur.execute("""
+        DELETE FROM mensajes
+        WHERE tipo IN ('e2e_notification', 'notification_template', 'gp2', 'protocol', 'ciphertext', 'biz_content_placeholder')
+    """)
+    print(f"   -> Notificaciones de sistema eliminadas: {cur.rowcount}")
+    cur.execute("UPDATE chats SET nombre = NULL WHERE nombre = chat_id")
+    conn.commit()
 
     print("1. Reparando remitentes de mensajes de grupo...")
     cur.execute("SELECT msg_id, chat_id, remitente FROM mensajes WHERE chat_id LIKE '%@g.us'")
@@ -27,39 +37,51 @@ def clean_database():
         conn.commit()
     print(f"   -> Remitentes de grupo corregidos: {len(sender_updates)}")
 
-    print("2. Limpiando binarios, miniaturas base64 y ruido en mensajes...")
-    cur.execute("SELECT msg_id, tipo, contenido, thumbnail FROM mensajes WHERE contenido IS NOT NULL AND contenido != ''")
+    print("2. Limpiando prefijos Protobuf, JIDs, binarios y ajustando zona horaria local...")
+    cur.execute("SELECT msg_id, tipo, contenido, thumbnail, timestamp, fecha_utc FROM mensajes")
     all_msgs = [dict(r) for r in cur.fetchall()]
 
     content_updates = []
     thumbnail_updates = []
+    date_updates = []
 
     for m in all_msgs:
         mid = m["msg_id"]
         tipo = m["tipo"]
         content = m["contenido"]
         existing_thumb = m["thumbnail"]
+        ts = m["timestamp"]
+        fecha_utc = m["fecha_utc"]
+
+        if ts and isinstance(ts, (int, float)):
+            try:
+                local_dt = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+                if local_dt != fecha_utc:
+                    date_updates.append((local_dt, mid))
+            except Exception:
+                pass
 
         if not content:
             continue
 
         orig = content
-        # Quitar caracteres de reemplazo unicode y de control
-        c = content.replace("\ufffd", "")
-        c = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', c).strip()
+        c = clean_protobuf_text(content)
 
-        # Si es un binario o base64 (como las miniaturas JPEG de imágenes y videos)
+        # Si es un binario, JID o base64
         if is_binary_or_base64_content(tipo, c):
-            # Rescatar miniatura si el mensaje no tenía una
-            extracted_thumb = extract_base64_jpeg(c)
+            extracted_thumb = extract_base64_jpeg(content)
             if extracted_thumb and not existing_thumb:
                 thumbnail_updates.append((extracted_thumb, mid))
             c = ""
-        else:
-            c = re.sub(r'^[^\w¿¡"\']+', '', c).strip()
 
         if c != orig:
             content_updates.append((c, mid))
+
+    if date_updates:
+        for i in range(0, len(date_updates), 1000):
+            cur.executemany("UPDATE mensajes SET fecha_utc = ? WHERE msg_id = ?", date_updates[i:i+1000])
+        conn.commit()
+    print(f"   -> Marcas de tiempo actualizadas a hora local: {len(date_updates)}")
 
     if thumbnail_updates:
         for i in range(0, len(thumbnail_updates), 1000):
