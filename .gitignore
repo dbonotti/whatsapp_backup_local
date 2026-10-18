@@ -33,5 +33,10 @@ venv/
 
 # Ignorar archivos JSON de dumps (pero mantener los de la extensión)
 *.json
-!extension/rules.json
 !extension/manifest.json
+
+# Capturas y archivos de depuración local
+Errores/
+
+# Exportaciones HTML de chats (evitar subir conversaciones exportadas por error)
+*.html
