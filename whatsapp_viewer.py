@@ -1,12 +1,14 @@
 import sqlite3
 import json
 import os
+import re
+import base64
 import mimetypes
 import webbrowser
 import traceback
 import html
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, unquote
 from datetime import datetime
 
 import db_manager
@@ -21,86 +23,131 @@ HTML_UI = """<!DOCTYPE html>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>WhatsApp Backup - Visor Local Avanzado</title>
   <style>
+    :root {
+      --bg-body: #111b21;
+      --bg-app: #ffffff;
+      --bg-sidebar: #ffffff;
+      --bg-header: #f0f2f5;
+      --bg-chat: #efeae2;
+      --bg-hover: #f5f6f6;
+      --bg-active: #f0f2f5;
+      --bg-input: #f0f2f5;
+      --bg-incoming: #ffffff;
+      --bg-outgoing: #d9fdd3;
+      --bg-badge: #ffffff;
+      --bg-quote: rgba(0,0,0,0.05);
+      --border-color: #e9edef;
+      --border-strong: #d1d7db;
+      --text-primary: #111b21;
+      --text-secondary: #54656f;
+      --text-muted: #667781;
+      --text-time: #8696a0;
+      --accent: #00a884;
+    }
+
+    body.dark {
+      --bg-body: #0b141a;
+      --bg-app: #111b21;
+      --bg-sidebar: #111b21;
+      --bg-header: #202c33;
+      --bg-chat: #0b141a;
+      --bg-hover: #202c33;
+      --bg-active: #2a3942;
+      --bg-input: #202c33;
+      --bg-incoming: #202c33;
+      --bg-outgoing: #005c4b;
+      --bg-badge: #182229;
+      --bg-quote: rgba(255,255,255,0.08);
+      --border-color: #222d34;
+      --border-strong: #2a3942;
+      --text-primary: #e9edef;
+      --text-secondary: #aebac1;
+      --text-muted: #8696a0;
+      --text-time: #8696a0;
+      --accent: #00a884;
+    }
+
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { 
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; 
-      background-color: #111b21; 
+      background-color: var(--bg-body); 
       height: 100vh; 
       display: flex; 
       justify-content: center; 
       align-items: center;
-      color: #111b21;
+      color: var(--text-primary);
     }
-    #app-container { display: flex; width: 100vw; height: 100vh; background-color: #fff; overflow: hidden; }
+    #app-container { display: flex; width: 100vw; height: 100vh; background-color: var(--bg-app); overflow: hidden; }
 
     /* Scrollbars modernos estilo WhatsApp */
     ::-webkit-scrollbar { width: 6px; height: 6px; }
     ::-webkit-scrollbar-track { background: transparent; }
-    ::-webkit-scrollbar-thumb { background: rgba(11,20,26,0.18); border-radius: 3px; }
-    ::-webkit-scrollbar-thumb:hover { background: rgba(11,20,26,0.28); }
+    ::-webkit-scrollbar-thumb { background: rgba(134,150,160,0.3); border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: rgba(134,150,160,0.5); }
 
     /* Panel izquierdo (Sidebar) */
-    #sidebar { width: 410px; min-width: 340px; border-right: 1px solid #e9edef; display: flex; flex-direction: column; background: #ffffff; }
+    #sidebar { width: 410px; min-width: 340px; border-right: 1px solid var(--border-color); display: flex; flex-direction: column; background: var(--bg-sidebar); }
     .sidebar-header { 
       height: 60px; 
-      background: #f0f2f5; 
+      background: var(--bg-header); 
       display: flex; 
       align-items: center; 
       justify-content: space-between; 
-      padding: 0 16px; 
+      padding: 0 14px; 
       font-weight: 600; 
       font-size: 15px;
-      color: #111b21; 
-      border-bottom: 1px solid #e9edef; 
+      color: var(--text-primary); 
+      border-bottom: 1px solid var(--border-color); 
     }
     .brand-title { display: flex; align-items: center; gap: 8px; }
-    .brand-title svg { fill: #25d366; }
+    .brand-title svg { fill: #25d366; flex-shrink: 0; }
     
-    .sidebar-actions { display: flex; align-items: center; gap: 6px; }
+    .sidebar-actions { display: flex; align-items: center; gap: 5px; }
     .btn-header-action {
-      border: none;
-      background: #ffffff;
-      border: 1px solid #d1d7db;
+      border: 1px solid var(--border-strong);
+      background: var(--bg-sidebar);
       border-radius: 14px;
-      padding: 4px 10px;
+      padding: 4px 9px;
       font-size: 11.5px;
       font-weight: 600;
-      color: #111b21;
+      color: var(--text-primary);
       cursor: pointer;
       display: flex;
       align-items: center;
       gap: 4px;
       transition: all 0.15s;
     }
-    .btn-header-action:hover { background: #f5f6f6; border-color: #00a884; color: #00a884; }
+    .btn-header-action:hover { background: var(--bg-hover); border-color: var(--accent); color: var(--accent); }
 
     .sync-badge { 
       font-size: 11.5px; 
-      padding: 4px 10px; 
+      padding: 4px 9px; 
       border-radius: 14px; 
-      background: #e7fce3; 
-      color: #075e54; 
+      background: rgba(37, 211, 102, 0.15); 
+      color: #25d366; 
       font-weight: 600; 
       display: flex; 
       align-items: center; 
-      gap: 6px; 
+      gap: 5px;
+      cursor: pointer;
     }
     .sync-dot { width: 7px; height: 7px; border-radius: 50%; background: #25d366; }
 
-    .search-section { padding: 8px 12px; background: #ffffff; border-bottom: 1px solid #f0f2f5; display: flex; flex-direction: column; gap: 6px; }
+    .search-section { padding: 8px 12px; background: var(--bg-sidebar); border-bottom: 1px solid var(--border-color); display: flex; flex-direction: column; gap: 6px; }
     .search-box-wrapper { display: flex; position: relative; align-items: center; }
     .search-box { 
       width: 100%; 
       padding: 8px 12px 8px 36px; 
       border-radius: 8px; 
-      border: 1px solid #e9edef; 
-      background: #f0f2f5; 
+      border: 1px solid var(--border-color); 
+      background: var(--bg-input); 
+      color: var(--text-primary);
       font-size: 14px; 
       outline: none; 
       transition: all 0.2s;
     }
-    .search-box:focus { background: #ffffff; border-color: #00a884; box-shadow: 0 0 0 1px #00a884; }
-    .search-icon-svg { position: absolute; left: 10px; fill: #54656f; width: 16px; height: 16px; pointer-events: none; }
+    .search-box:focus { background: var(--bg-sidebar); border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+    .search-icon-svg { position: absolute; left: 10px; fill: var(--text-secondary); width: 16px; height: 16px; pointer-events: none; }
     
     .search-mode-tabs { display: flex; gap: 6px; font-size: 12px; }
     .tab-btn { 
@@ -108,12 +155,12 @@ HTML_UI = """<!DOCTYPE html>
       background: none; 
       padding: 4px 10px; 
       cursor: pointer; 
-      color: #54656f; 
+      color: var(--text-secondary); 
       border-radius: 12px; 
       font-weight: 500; 
       transition: all 0.15s;
     }
-    .tab-btn.active { background: #00a884; color: #ffffff; font-weight: 600; }
+    .tab-btn.active { background: var(--accent); color: #ffffff; font-weight: 600; }
 
     #chat-list, #search-results-list { flex: 1; overflow-y: auto; list-style: none; }
     .chat-item, .search-item { 
@@ -121,11 +168,11 @@ HTML_UI = """<!DOCTYPE html>
       align-items: center; 
       padding: 10px 16px; 
       cursor: pointer; 
-      border-bottom: 1px solid #f5f6f6; 
+      border-bottom: 1px solid var(--border-color); 
       transition: background 0.15s; 
     }
-    .chat-item:hover, .search-item:hover { background: #f5f6f6; }
-    .chat-item.active { background: #f0f2f5; border-left: 4px solid #00a884; }
+    .chat-item:hover, .search-item:hover { background: var(--bg-hover); }
+    .chat-item.active { background: var(--bg-active); border-left: 4px solid var(--accent); }
     
     .chat-avatar { 
       width: 46px; 
@@ -142,55 +189,54 @@ HTML_UI = """<!DOCTYPE html>
     }
     .chat-info { flex: 1; overflow: hidden; }
     .chat-header-row { display: flex; justify-content: space-between; align-items: baseline; }
-    .chat-name { font-size: 15px; font-weight: 600; color: #111b21; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .chat-time { font-size: 11px; color: #8696a0; flex-shrink: 0; margin-left: 6px; }
-    .chat-preview { font-size: 13.5px; color: #667781; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 3px; }
+    .chat-name { font-size: 15px; font-weight: 600; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .chat-time { font-size: 11px; color: var(--text-time); flex-shrink: 0; margin-left: 6px; }
+    .chat-preview { font-size: 13.5px; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 3px; }
 
     /* Resultados Búsqueda FTS5 */
     .search-item { flex-direction: column; align-items: flex-start; gap: 4px; padding: 12px 16px; }
-    .search-chat-title { font-size: 12.5px; color: #00a884; font-weight: 600; }
-    .search-snippet { font-size: 14px; color: #111b21; line-height: 19px; }
-    .search-snippet mark { background-color: #ffe082; padding: 1px 3px; border-radius: 2px; font-weight: 600; }
-    .search-date { font-size: 11px; color: #8696a0; align-self: flex-end; }
+    .search-chat-title { font-size: 12.5px; color: var(--accent); font-weight: 600; }
+    .search-snippet { font-size: 14px; color: var(--text-primary); line-height: 19px; }
+    .search-snippet mark { background-color: #ffe082; color: #111b21; padding: 1px 3px; border-radius: 2px; font-weight: 600; }
+    .search-date { font-size: 11px; color: var(--text-time); align-self: flex-end; }
 
     /* Panel derecho (Conversación) */
-    #main-chat { flex: 1; display: flex; flex-direction: column; background: #efeae2; position: relative; }
+    #main-chat { flex: 1; display: flex; flex-direction: column; background: var(--bg-chat); position: relative; }
     #chat-header { 
       height: 60px; 
-      background: #f0f2f5; 
+      background: var(--bg-header); 
       display: flex; 
       align-items: center; 
       justify-content: space-between;
       padding: 0 20px; 
-      border-bottom: 1px solid #d1d7db; 
+      border-bottom: 1px solid var(--border-strong); 
       z-index: 2; 
     }
     .header-left { display: flex; align-items: center; }
-    #header-info h3 { font-size: 16px; color: #111b21; font-weight: 600; }
-    #header-info p { font-size: 12px; color: #667781; margin-top: 1px; }
+    #header-info h3 { font-size: 16px; color: var(--text-primary); font-weight: 600; }
+    #header-info p { font-size: 12px; color: var(--text-muted); margin-top: 1px; }
 
     .header-actions { display: flex; align-items: center; gap: 8px; }
     .btn-chat-action {
-      border: none;
-      background: #ffffff;
-      border: 1px solid #d1d7db;
+      border: 1px solid var(--border-strong);
+      background: var(--bg-sidebar);
       border-radius: 14px;
       padding: 5px 12px;
       font-size: 12px;
       font-weight: 600;
-      color: #111b21;
+      color: var(--text-primary);
       cursor: pointer;
       display: flex;
       align-items: center;
       gap: 5px;
       transition: all 0.15s;
     }
-    .btn-chat-action:hover { background: #f5f6f6; border-color: #00a884; color: #00a884; }
+    .btn-chat-action:hover { background: var(--bg-hover); border-color: var(--accent); color: var(--accent); }
 
     /* Barra de filtros dentro del chat */
     #chat-filter-bar {
-      background: #ffffff;
-      border-bottom: 1px solid #e9edef;
+      background: var(--bg-sidebar);
+      border-bottom: 1px solid var(--border-color);
       padding: 6px 20px;
       display: flex;
       align-items: center;
@@ -198,30 +244,31 @@ HTML_UI = """<!DOCTYPE html>
       font-size: 12px;
       gap: 10px;
       z-index: 1;
+      flex-wrap: wrap;
     }
-    .filter-pills { display: flex; gap: 6px; }
+    .filter-pills { display: flex; gap: 6px; flex-wrap: wrap; }
     .filter-pill {
-      border: 1px solid #e9edef;
-      background: #f0f2f5;
+      border: 1px solid var(--border-color);
+      background: var(--bg-input);
       padding: 3px 9px;
       border-radius: 12px;
       cursor: pointer;
-      color: #54656f;
+      color: var(--text-secondary);
       font-weight: 500;
       transition: all 0.15s;
     }
-    .filter-pill.active { background: #00a884; color: #ffffff; border-color: #00a884; font-weight: 600; }
-    .filter-dates { display: flex; align-items: center; gap: 6px; color: #667781; }
+    .filter-pill.active { background: var(--accent); color: #ffffff; border-color: var(--accent); font-weight: 600; }
+    .filter-dates { display: flex; align-items: center; gap: 6px; color: var(--text-muted); }
     .date-input {
-      border: 1px solid #e9edef;
-      background: #f0f2f5;
+      border: 1px solid var(--border-color);
+      background: var(--bg-input);
       padding: 3px 6px;
       border-radius: 6px;
       font-size: 11.5px;
       outline: none;
-      color: #111b21;
+      color: var(--text-primary);
     }
-    .date-input:focus { border-color: #00a884; background: #fff; }
+    .date-input:focus { border-color: var(--accent); background: var(--bg-sidebar); }
 
     #messages-container { 
       flex: 1; 
@@ -232,11 +279,27 @@ HTML_UI = """<!DOCTYPE html>
       gap: 4px; 
     }
 
+    .btn-load-more {
+      align-self: center;
+      border: 1px solid var(--border-strong);
+      background: var(--bg-badge);
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 600;
+      padding: 6px 16px;
+      border-radius: 16px;
+      cursor: pointer;
+      margin: 6px 0 12px 0;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.1);
+      transition: all 0.15s;
+    }
+    .btn-load-more:hover { background: var(--bg-hover); }
+
     /* Burbujas de chat */
     .date-badge { 
       align-self: center; 
-      background: #ffffff; 
-      color: #54656f; 
+      background: var(--bg-badge); 
+      color: var(--text-secondary); 
       font-size: 11.5px; 
       font-weight: 500; 
       padding: 5px 12px; 
@@ -259,14 +322,14 @@ HTML_UI = """<!DOCTYPE html>
     }
     .msg-incoming { 
       align-self: flex-start; 
-      background: #ffffff; 
-      color: #111b21; 
+      background: var(--bg-incoming); 
+      color: var(--text-primary); 
       border-top-left-radius: 0; 
     }
     .msg-outgoing { 
       align-self: flex-end; 
-      background: #d9fdd3; 
-      color: #111b21; 
+      background: var(--bg-outgoing); 
+      color: var(--text-primary); 
       border-top-right-radius: 0; 
     }
     
@@ -275,11 +338,33 @@ HTML_UI = """<!DOCTYPE html>
       font-weight: 600; 
       margin-bottom: 2px; 
     }
+    .msg-quote {
+      background: var(--bg-quote);
+      border-left: 4px solid var(--accent);
+      border-radius: 4px;
+      padding: 4px 8px;
+      margin-bottom: 4px;
+      font-size: 12.5px;
+      cursor: pointer;
+    }
+    .msg-quote-author {
+      font-weight: 600;
+      font-size: 11.5px;
+      color: var(--accent);
+      margin-bottom: 1px;
+    }
+    .msg-quote-text {
+      color: var(--text-secondary);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 340px;
+    }
     .msg-text { white-space: pre-wrap; font-size: 14.2px; word-break: break-word; }
     .msg-footer { 
       align-self: flex-end; 
       font-size: 10.5px; 
-      color: #667781; 
+      color: var(--text-muted); 
       margin-top: 3px; 
       margin-left: 16px; 
       display: flex; 
@@ -312,18 +397,18 @@ HTML_UI = """<!DOCTYPE html>
     }
     .media-audio { width: 250px; height: 36px; outline: none; }
     .btn-speed {
-      border: 1px solid #d1d7db;
-      background: #ffffff;
+      border: 1px solid var(--border-strong);
+      background: var(--bg-sidebar);
       border-radius: 10px;
       padding: 3px 6px;
       font-size: 10.5px;
       font-weight: 700;
-      color: #54656f;
+      color: var(--text-secondary);
       cursor: pointer;
       user-select: none;
       transition: all 0.15s;
     }
-    .btn-speed:hover { background: #e9edef; color: #111b21; }
+    .btn-speed:hover { background: var(--bg-hover); color: var(--text-primary); }
 
     .media-video { max-width: 340px; border-radius: 6px; display: block; }
     .media-doc { 
@@ -331,18 +416,18 @@ HTML_UI = """<!DOCTYPE html>
       align-items: center; 
       gap: 10px; 
       padding: 8px 12px; 
-      background: rgba(0,0,0,0.04); 
+      background: var(--bg-quote); 
       border-radius: 6px; 
       text-decoration: none; 
-      color: #111b21; 
+      color: var(--text-primary); 
       font-size: 13.5px; 
       transition: background 0.15s; 
     }
-    .media-doc:hover { background: rgba(0,0,0,0.08); }
+    .media-doc:hover { opacity: 0.9; }
     .media-doc-icon { font-size: 24px; }
     .media-expired {
       font-size: 12px;
-      color: #8696a0;
+      color: var(--text-time);
       font-style: italic;
       display: flex;
       align-items: center;
@@ -366,8 +451,8 @@ HTML_UI = """<!DOCTYPE html>
     }
     #image-modal img { max-width: 90vw; max-height: 90vh; border-radius: 8px; box-shadow: 0 4px 20px rgba(0,0,0,0.6); }
 
-    /* Modal de Backups */
-    #backup-modal {
+    /* Modal de Backups y Multimedia */
+    #backup-modal, #media-modal {
       display: none;
       position: fixed;
       z-index: 1000;
@@ -380,24 +465,29 @@ HTML_UI = """<!DOCTYPE html>
       justify-content: center;
     }
     .modal-card {
-      background: #ffffff;
+      background: var(--bg-sidebar);
+      color: var(--text-primary);
       border-radius: 12px;
       width: 480px;
       max-width: 90vw;
       padding: 20px 24px;
-      box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+      box-shadow: 0 10px 30px rgba(0,0,0,0.3);
       display: flex;
       flex-direction: column;
       gap: 14px;
     }
-    .modal-card h3 { font-size: 17px; color: #111b21; }
-    .modal-card p { font-size: 13.5px; color: #54656f; line-height: 19px; }
-    .backup-list { max-height: 200px; overflow-y: auto; list-style: none; border: 1px solid #e9edef; border-radius: 8px; }
-    .backup-item { display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; border-bottom: 1px solid #f5f6f6; font-size: 12.5px; }
+    .modal-card h3 { font-size: 17px; color: var(--text-primary); }
+    .modal-card p { font-size: 13.5px; color: var(--text-secondary); line-height: 19px; }
+    .backup-list { max-height: 200px; overflow-y: auto; list-style: none; border: 1px solid var(--border-color); border-radius: 8px; }
+    .backup-item { display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; border-bottom: 1px solid var(--border-color); font-size: 12.5px; }
     .backup-item:last-child { border-bottom: none; }
+    .stats-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .stat-box { background: var(--bg-input); border: 1px solid var(--border-color); padding: 10px 14px; border-radius: 8px; }
+    .stat-box .stat-val { font-size: 20px; font-weight: 700; color: var(--accent); }
+    .stat-box .stat-lbl { font-size: 12px; color: var(--text-secondary); }
     .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; }
-    .btn-modal-cancel { border: 1px solid #d1d7db; background: #fff; padding: 6px 14px; border-radius: 8px; cursor: pointer; font-size: 13px; }
-    .btn-modal-confirm { border: none; background: #00a884; color: #fff; padding: 6px 16px; border-radius: 8px; cursor: pointer; font-weight: 600; font-size: 13px; }
+    .btn-modal-cancel { border: 1px solid var(--border-strong); background: var(--bg-sidebar); color: var(--text-primary); padding: 6px 14px; border-radius: 8px; cursor: pointer; font-size: 13px; }
+    .btn-modal-confirm { border: none; background: var(--accent); color: #fff; padding: 6px 16px; border-radius: 8px; cursor: pointer; font-weight: 600; font-size: 13px; }
 
     /* Estado vacío */
     #empty-state { 
@@ -406,12 +496,12 @@ HTML_UI = """<!DOCTYPE html>
       flex-direction: column; 
       align-items: center; 
       justify-content: center; 
-      color: #667781; 
-      background: #f0f2f5; 
+      color: var(--text-muted); 
+      background: var(--bg-header); 
       text-align: center;
       padding: 20px;
     }
-    #empty-state h2 { color: #41525d; margin-bottom: 8px; font-weight: 400; font-size: 26px; }
+    #empty-state h2 { color: var(--text-primary); margin-bottom: 8px; font-weight: 400; font-size: 26px; }
     #empty-state p { font-size: 14px; max-width: 480px; line-height: 20px; }
 
     /* Notificación Toast */
@@ -443,8 +533,10 @@ HTML_UI = """<!DOCTYPE html>
           <span>WhatsApp Backup</span>
         </div>
         <div class="sidebar-actions">
+          <button class="btn-header-action" id="btnTheme" onclick="toggleTheme()" title="Cambiar modo claro/oscuro">🌙</button>
+          <button class="btn-header-action" onclick="openMediaModal()" title="Estado de descargas multimedia">🎬 Media</button>
           <button class="btn-header-action" onclick="openBackupModal()" title="Gestionar copias de respaldo de SQLite">💾 Backup</button>
-          <div class="sync-badge" id="syncStatusBadge">
+          <div class="sync-badge" id="syncStatusBadge" onclick="openMediaModal()" title="Ver estado de sincronización y multimedia">
             <div class="sync-dot"></div>
             <span id="syncStatusText">Conectado</span>
           </div>
@@ -477,7 +569,8 @@ HTML_UI = """<!DOCTYPE html>
           </div>
         </div>
         <div class="header-actions">
-          <button class="btn-chat-action" onclick="exportCurrentChat()" title="Exportar chat completo a archivo HTML">📥 Exportar Chat</button>
+          <button class="btn-chat-action" onclick="exportCurrentChat(false)" title="Exportar chat a HTML ligero">📥 Exportar HTML</button>
+          <button class="btn-chat-action" onclick="exportCurrentChat(true)" title="Exportar chat con imágenes/audios incrustados en un único archivo autónomo">📦 Exportar Autónomo</button>
         </div>
       </div>
 
@@ -503,7 +596,7 @@ HTML_UI = """<!DOCTYPE html>
       <div id="empty-state">
         <h2>WhatsApp Business Backup</h2>
         <p>Selecciona una conversación a la izquierda o utiliza el buscador indexado de texto completo.</p>
-        <p id="dbStatsText" style="margin-top: 14px; font-size: 13px; color: #8696a0;"></p>
+        <p id="dbStatsText" style="margin-top: 14px; font-size: 13px; color: var(--text-time);"></p>
       </div>
     </div>
   </div>
@@ -519,11 +612,29 @@ HTML_UI = """<!DOCTYPE html>
       <h3>Copias de Seguridad de Base de Datos</h3>
       <p>Crea copias manuales puntuales de tu archivo SQLite sin interrumpir el funcionamiento del servidor.</p>
       <div class="backup-list" id="backupListContainer">
-        <p style="padding: 14px; color: #8696a0; text-align: center;">Cargando respaldos...</p>
+        <p style="padding: 14px; color: var(--text-time); text-align: center;">Cargando respaldos...</p>
       </div>
       <div class="modal-actions">
         <button class="btn-modal-cancel" onclick="closeBackupModal()">Cerrar</button>
         <button class="btn-modal-confirm" onclick="triggerManualBackup()">+ Crear Nuevo Backup</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal de Estado Multimedia -->
+  <div id="media-modal" onclick="if(event.target===this) closeMediaModal()">
+    <div class="modal-card">
+      <h3>Estado de Descargas Multimedia</h3>
+      <p>Los archivos multimedia se descargan y descifran automáticamente en segundo plano desde los servidores de WhatsApp.</p>
+      <div class="stats-grid">
+        <div class="stat-box"><div class="stat-val" id="statMediaDownloaded">0</div><div class="stat-lbl">Descargados</div></div>
+        <div class="stat-box"><div class="stat-val" id="statMediaPending">0</div><div class="stat-lbl">En cola / Pendientes</div></div>
+        <div class="stat-box"><div class="stat-val" id="statMediaFailed">0</div><div class="stat-lbl">Con error (Reintentables)</div></div>
+        <div class="stat-box"><div class="stat-val" id="statMediaExpired">0</div><div class="stat-lbl">Expirados en CDN</div></div>
+      </div>
+      <div class="modal-actions">
+        <button class="btn-modal-cancel" onclick="closeMediaModal()">Cerrar</button>
+        <button class="btn-modal-confirm" onclick="retryFailedMedia()">🔄 Reintentar Fallidos</button>
       </div>
     </div>
   </div>
@@ -537,6 +648,10 @@ HTML_UI = """<!DOCTYPE html>
     let selectedChatId = null;
     let activeMediaFilter = null;
     let currentMessages = [];
+    let filteredMessages = [];
+    let renderedCount = 0;
+    const PAGE_SIZE = 300;
+    let lastSyncData = {};
 
     const AVATAR_COLORS = [
       '#00a884', '#0284c7', '#7c3aed', '#db2777', 
@@ -546,6 +661,25 @@ HTML_UI = """<!DOCTYPE html>
       '#1f7a63', '#1e88e5', '#8e24aa', '#e53935', 
       '#fb8c00', '#00acc1', '#43a047', '#3949ab'
     ];
+
+    function safeDomId(prefix, rawId) {
+      if (!rawId) return prefix + 'unknown';
+      return prefix + encodeURIComponent(String(rawId)).replace(/[^a-zA-Z0-9_-]/g, '_');
+    }
+
+    function toggleTheme() {
+      const isDark = document.body.classList.toggle('dark');
+      localStorage.setItem('wa_backup_theme', isDark ? 'dark' : 'light');
+      document.getElementById('btnTheme').textContent = isDark ? '☀️' : '🌙';
+    }
+
+    function initTheme() {
+      const saved = localStorage.getItem('wa_backup_theme');
+      if (saved === 'dark') {
+        document.body.classList.add('dark');
+        document.getElementById('btnTheme').textContent = '☀️';
+      }
+    }
 
     function showToast(message) {
       const toast = document.getElementById('toast');
@@ -602,6 +736,7 @@ HTML_UI = """<!DOCTYPE html>
     }
 
     async function init() {
+      initTheme();
       await updateSyncStatus();
       await loadChats();
       setInterval(updateSyncStatus, 15000);
@@ -611,9 +746,13 @@ HTML_UI = """<!DOCTYPE html>
       try {
         const res = await fetch('/api/sync/status');
         const data = await res.json();
+        lastSyncData = data;
         document.getElementById('syncStatusText').textContent = `${data.total_messages.toLocaleString()} msgs`;
         document.getElementById('dbStatsText').textContent = 
-          `Base de datos: ${data.total_messages.toLocaleString()} mensajes | ${data.total_chats} chats | ${data.downloaded_media || 0} archivos multimedia`;
+          `Base de datos: ${data.total_messages.toLocaleString()} mensajes | ${data.total_chats} chats | ${data.downloaded_media || 0} archivos multimedia (${data.pending_media || 0} en cola)`;
+        if (document.getElementById('media-modal').style.display === 'flex') {
+          renderMediaStats(data);
+        }
       } catch (e) {
         document.getElementById('syncStatusText').textContent = 'Desconectado';
       }
@@ -631,7 +770,7 @@ HTML_UI = """<!DOCTYPE html>
       chats.forEach(chat => {
         const li = document.createElement('li');
         li.className = 'chat-item' + (chat.chat_id === selectedChatId ? ' active' : '');
-        li.id = 'chat-' + btoa(chat.chat_id).replace(/=/g, '');
+        li.id = safeDomId('chat-', chat.chat_id);
         li.onclick = () => selectChat(chat);
         
         const friendlyTitle = formatFriendlyName(chat.display_name, chat.chat_id);
@@ -693,7 +832,7 @@ HTML_UI = """<!DOCTYPE html>
       } else {
         clearTimeout(searchDebounceTimer);
         if (!query) {
-          document.getElementById('search-results-list').innerHTML = '<li style="padding: 24px; color: #8696a0; text-align: center;">Escribe una palabra o frase para buscar...</li>';
+          document.getElementById('search-results-list').innerHTML = '<li style="padding: 24px; color: var(--text-time); text-align: center;">Escribe una palabra o frase para buscar...</li>';
           return;
         }
         searchDebounceTimer = setTimeout(() => performGlobalSearch(query), 300);
@@ -702,13 +841,13 @@ HTML_UI = """<!DOCTYPE html>
 
     async function performGlobalSearch(query) {
       const list = document.getElementById('search-results-list');
-      list.innerHTML = '<li style="padding: 24px; color: #8696a0; text-align: center;">Buscando en base de datos...</li>';
+      list.innerHTML = '<li style="padding: 24px; color: var(--text-time); text-align: center;">Buscando en base de datos...</li>';
       try {
         const res = await fetch(`/api/search?q=${encodeURIComponent(query)}`);
         const results = await res.json();
         list.innerHTML = '';
         if (results.length === 0) {
-          list.innerHTML = '<li style="padding: 24px; color: #8696a0; text-align: center;">No se encontraron mensajes coincidentes.</li>';
+          list.innerHTML = '<li style="padding: 24px; color: var(--text-time); text-align: center;">No se encontraron mensajes coincidentes.</li>';
           return;
         }
         results.forEach(item => {
@@ -739,7 +878,7 @@ HTML_UI = """<!DOCTYPE html>
       document.getElementById('filterDateTo').value = '';
 
       document.querySelectorAll('.chat-item').forEach(el => el.classList.remove('active'));
-      const activeEl = document.getElementById('chat-' + btoa(chat.chat_id).replace(/=/g, ''));
+      const activeEl = document.getElementById(safeDomId('chat-', chat.chat_id));
       if (activeEl) activeEl.classList.add('active');
 
       document.getElementById('empty-state').style.display = 'none';
@@ -760,32 +899,80 @@ HTML_UI = """<!DOCTYPE html>
       avatarEl.style.backgroundColor = getColorForName(friendlyTitle);
 
       const container = document.getElementById('messages-container');
-      container.innerHTML = '<p style="text-align: center; color: #667781; margin-top: 24px;">Cargando mensajes...</p>';
+      container.innerHTML = '<p style="text-align: center; color: var(--text-muted); margin-top: 24px;">Cargando mensajes...</p>';
 
       const res = await fetch(`/api/messages?chat_id=${encodeURIComponent(chat.chat_id)}`);
       currentMessages = await res.json();
-      
-      renderMessages(currentMessages, scrollToMsgId);
+      filteredMessages = currentMessages;
+
+      if (scrollToMsgId) {
+        const targetIdx = filteredMessages.findIndex(m => m.msg_id === scrollToMsgId);
+        if (targetIdx !== -1) {
+          renderedCount = Math.max(PAGE_SIZE, filteredMessages.length - targetIdx + 50);
+        } else {
+          renderedCount = PAGE_SIZE;
+        }
+      } else {
+        renderedCount = PAGE_SIZE;
+      }
+
+      renderMessages(filteredMessages, scrollToMsgId);
     }
 
-    function renderMessages(messages, scrollToMsgId = null) {
+    function loadOlderMessages() {
+      const container = document.getElementById('messages-container');
+      const prevScrollHeight = container.scrollHeight;
+      renderedCount += PAGE_SIZE;
+      renderMessages(filteredMessages, null, true);
+      container.scrollTop = container.scrollHeight - prevScrollHeight;
+    }
+
+    function scrollToMessage(msgId) {
+      const idx = filteredMessages.findIndex(m => m.msg_id === msgId);
+      if (idx !== -1 && (filteredMessages.length - idx) > renderedCount) {
+        renderedCount = filteredMessages.length - idx + 50;
+        renderMessages(filteredMessages, msgId);
+        return;
+      }
+      const target = document.getElementById(safeDomId('msg-', msgId));
+      if (target) {
+        target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        target.style.outline = '2px solid var(--accent)';
+        setTimeout(() => target.style.outline = 'none', 2500);
+      }
+    }
+
+    function renderMessages(messages, scrollToMsgId = null, preserveScroll = false) {
       const container = document.getElementById('messages-container');
       container.innerHTML = '';
       let lastDate = null;
       const isGroup = selectedChatId && selectedChatId.endsWith('@g.us');
 
       if (messages.length === 0) {
-        container.innerHTML = '<p style="text-align: center; color: #8696a0; margin-top: 30px;">No hay mensajes coincidentes con los filtros.</p>';
+        container.innerHTML = '<p style="text-align: center; color: var(--text-time); margin-top: 30px;">No hay mensajes coincidentes con los filtros.</p>';
         return;
       }
 
-      messages.forEach(m => {
+      const startIdx = Math.max(0, messages.length - renderedCount);
+      const visibleMessages = messages.slice(startIdx);
+
+      if (startIdx > 0) {
+        const loadMoreBtn = document.createElement('button');
+        loadMoreBtn.className = 'btn-load-more';
+        loadMoreBtn.textContent = `⬆️ Cargar mensajes anteriores (${startIdx.toLocaleString()} restantes)`;
+        loadMoreBtn.onclick = loadOlderMessages;
+        container.appendChild(loadMoreBtn);
+      }
+
+      const fragment = document.createDocumentFragment();
+
+      visibleMessages.forEach(m => {
         const msgDate = m.fecha_utc ? m.fecha_utc.split(' ')[0] : 'Desconocida';
         if (msgDate !== lastDate) {
           const dateDiv = document.createElement('div');
           dateDiv.className = 'date-badge';
           dateDiv.textContent = msgDate;
-          container.appendChild(dateDiv);
+          fragment.appendChild(dateDiv);
           lastDate = msgDate;
         }
 
@@ -793,7 +980,7 @@ HTML_UI = """<!DOCTYPE html>
 
         const bubble = document.createElement('div');
         bubble.className = `msg-bubble ${isMine ? 'msg-outgoing' : 'msg-incoming'}`;
-        if (m.msg_id) bubble.id = 'msg-' + btoa(m.msg_id).replace(/=/g, '');
+        if (m.msg_id) bubble.id = safeDomId('msg-', m.msg_id);
 
         let senderHtml = '';
         if (isGroup && !isMine) {
@@ -802,18 +989,30 @@ HTML_UI = """<!DOCTYPE html>
           senderHtml = `<div class="msg-sender" style="color: ${senderColor};">${escapeHtml(senderDisplayName)}</div>`;
         }
 
+        let quoteHtml = '';
+        if (m.quoted_body || m.quoted_msg_id) {
+          const qAuthor = m.quoted_author ? formatFriendlyName(null, m.quoted_author) : 'Mensaje citado';
+          const qText = cleanText(m.quoted_body) || '📎 Archivo / Mensaje citado';
+          const clickAttr = m.quoted_msg_id ? `onclick="scrollToMessage('${escapeHtml(m.quoted_msg_id)}')"` : '';
+          quoteHtml = `
+            <div class="msg-quote" ${clickAttr}>
+              <div class="msg-quote-author">${escapeHtml(qAuthor)}</div>
+              <div class="msg-quote-text">${escapeHtml(qText)}</div>
+            </div>`;
+        }
+
         let mediaHtml = '';
         if (m.archivo_local) {
-          if (m.tipo === 'image' || (m.mimetype && m.mimetype.startsWith('image/'))) {
+          if (m.tipo === 'image' || m.tipo === 'sticker' || (m.mimetype && m.mimetype.startsWith('image/'))) {
             mediaHtml = `<div class="media-container"><img class="media-img" src="/${m.archivo_local}" onclick="openModal(this.src)" loading="lazy"></div>`;
           } else if (m.tipo === 'audio' || m.tipo === 'ptt' || (m.mimetype && m.mimetype.startsWith('audio/'))) {
             mediaHtml = `
               <div class="media-container audio-wrapper">
-                <audio class="media-audio" controls src="/${m.archivo_local}" onended="playNextAudio(this)"></audio>
+                <audio class="media-audio" controls preload="metadata" src="/${m.archivo_local}" onended="playNextAudio(this)"></audio>
                 <button class="btn-speed" onclick="toggleAudioSpeed(this)">1x</button>
               </div>`;
           } else if (m.tipo === 'video' || (m.mimetype && m.mimetype.startsWith('video/'))) {
-            mediaHtml = `<div class="media-container"><video class="media-video" controls src="/${m.archivo_local}"></video></div>`;
+            mediaHtml = `<div class="media-container"><video class="media-video" controls preload="metadata" src="/${m.archivo_local}"></video></div>`;
           } else {
             const fileName = m.archivo_local.split('/').pop();
             mediaHtml = `<div class="media-container"><a class="media-doc" href="/${m.archivo_local}" download><span class="media-doc-icon">📄</span><span>${escapeHtml(fileName)}</span></a></div>`;
@@ -830,6 +1029,7 @@ HTML_UI = """<!DOCTYPE html>
 
         bubble.innerHTML = `
           ${senderHtml}
+          ${quoteHtml}
           ${mediaHtml}
           ${cleanBody ? `<div class="msg-text">${escapeHtml(cleanBody)}</div>` : ''}
           <div class="msg-footer">
@@ -837,19 +1037,23 @@ HTML_UI = """<!DOCTYPE html>
             ${checkHtml}
           </div>
         `;
-        container.appendChild(bubble);
+        fragment.appendChild(bubble);
       });
 
+      container.appendChild(fragment);
+
       if (scrollToMsgId) {
-        const target = document.getElementById('msg-' + btoa(scrollToMsgId).replace(/=/g, ''));
+        const target = document.getElementById(safeDomId('msg-', scrollToMsgId));
         if (target) {
           target.scrollIntoView({ behavior: 'smooth', block: 'center' });
-          target.style.outline = '2px solid #00a884';
+          target.style.outline = '2px solid var(--accent)';
           setTimeout(() => target.style.outline = 'none', 2500);
           return;
         }
       }
-      container.scrollTop = container.scrollHeight;
+      if (!preserveScroll) {
+        container.scrollTop = container.scrollHeight;
+      }
     }
 
     // Filtros multimedia en el chat
@@ -891,7 +1095,9 @@ HTML_UI = """<!DOCTYPE html>
         filtered = filtered.filter(m => (m.timestamp || 0) <= toTs);
       }
 
-      renderMessages(filtered);
+      filteredMessages = filtered;
+      renderedCount = PAGE_SIZE;
+      renderMessages(filteredMessages);
     }
 
     // Control de velocidad y reproducción continua de audios
@@ -919,9 +1125,41 @@ HTML_UI = """<!DOCTYPE html>
     }
 
     // Exportación de Chat a HTML
-    function exportCurrentChat() {
+    function exportCurrentChat(embedMedia = false) {
       if (!selectedChatId) return;
-      window.open(`/api/export/html?chat_id=${encodeURIComponent(selectedChatId)}`, '_blank');
+      const embedParam = embedMedia ? '&embed=1' : '';
+      window.open(`/api/export/html?chat_id=${encodeURIComponent(selectedChatId)}${embedParam}`, '_blank');
+    }
+
+    // Gestión de Multimedia
+    async function openMediaModal() {
+      const modal = document.getElementById('media-modal');
+      modal.style.display = 'flex';
+      await updateSyncStatus();
+      renderMediaStats(lastSyncData);
+    }
+
+    function closeMediaModal() {
+      document.getElementById('media-modal').style.display = 'none';
+    }
+
+    function renderMediaStats(data) {
+      document.getElementById('statMediaDownloaded').textContent = (data.downloaded_media || 0).toLocaleString();
+      document.getElementById('statMediaPending').textContent = (data.pending_media || 0).toLocaleString();
+      document.getElementById('statMediaFailed').textContent = (data.failed_media || 0).toLocaleString();
+      document.getElementById('statMediaExpired').textContent = (data.expired_media || 0).toLocaleString();
+    }
+
+    async function retryFailedMedia() {
+      showToast('Reencolando descargas multimedia fallidas...');
+      try {
+        const res = await fetch('/api/media/retry', { method: 'POST' });
+        const data = await res.json();
+        showToast(`Se reencolaron ${data.reset_count || 0} archivos para descarga.`);
+        await updateSyncStatus();
+      } catch (e) {
+        showToast('Error al reintentar descargas multimedia');
+      }
     }
 
     // Gestión de Backups
@@ -937,12 +1175,12 @@ HTML_UI = """<!DOCTYPE html>
 
     async function loadBackupList() {
       const container = document.getElementById('backupListContainer');
-      container.innerHTML = '<p style="padding: 14px; color: #8696a0; text-align: center;">Cargando respaldos...</p>';
+      container.innerHTML = '<p style="padding: 14px; color: var(--text-time); text-align: center;">Cargando respaldos...</p>';
       try {
         const res = await fetch('/api/backup/list');
         const backups = await res.json();
         if (backups.length === 0) {
-          container.innerHTML = '<p style="padding: 14px; color: #8696a0; text-align: center;">No hay copias de seguridad manuales aún.</p>';
+          container.innerHTML = '<p style="padding: 14px; color: var(--text-time); text-align: center;">No hay copias de seguridad manuales aún.</p>';
           return;
         }
         container.innerHTML = '';
@@ -952,7 +1190,7 @@ HTML_UI = """<!DOCTYPE html>
           div.innerHTML = `
             <div>
               <strong>${escapeHtml(b.filename)}</strong>
-              <div style="color: #8696a0; font-size: 11px;">${b.created_at} · ${b.size_mb} MB</div>
+              <div style="color: var(--text-time); font-size: 11px;">${b.created_at} · ${b.size_mb} MB</div>
             </div>
             <a href="/api/backup/download?file=${encodeURIComponent(b.filename)}" class="btn-chat-action" style="text-decoration: none;">Descargar</a>
           `;
@@ -998,7 +1236,23 @@ HTML_UI = """<!DOCTYPE html>
 </html>
 """
 
-def generate_chat_html_export(chat_id):
+def _file_to_data_uri(rel_path, default_mime="application/octet-stream", max_size_mb=15):
+    """Convierte un archivo local en un Data URI base64 si existe y no supera el límite."""
+    try:
+        safe_rel = rel_path.lstrip("/").replace("/", os.sep)
+        if not os.path.isfile(safe_rel):
+            return None
+        if os.path.getsize(safe_rel) > max_size_mb * 1024 * 1024:
+            return None
+        mime, _ = mimetypes.guess_type(safe_rel)
+        mime = mime or default_mime
+        with open(safe_rel, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode("ascii")
+        return f"data:{mime};base64,{b64}"
+    except Exception:
+        return None
+
+def generate_chat_html_export(chat_id, embed_media=False):
     """Genera un archivo HTML autocontenido para imprimir o archivar."""
     conn = db_manager.get_connection()
     cur = conn.cursor()
@@ -1015,7 +1269,8 @@ def generate_chat_html_export(chat_id):
     cur.execute("""
         SELECT 
             m.msg_id, m.es_mio, m.fecha_utc, m.timestamp, m.tipo, m.contenido,
-            m.archivo_local, m.mimetype,
+            m.archivo_local, m.mimetype, m.thumbnail,
+            m.quoted_msg_id, m.quoted_author, m.quoted_body,
             COALESCE(ct.nombre, ct.push_name, m.remitente) AS remitente_nombre,
             m.remitente AS remitente_jid
         FROM mensajes m
@@ -1045,6 +1300,7 @@ def generate_chat_html_export(chat_id):
     .incoming {{ align-self: flex-start; background: #ffffff; }}
     .outgoing {{ align-self: flex-end; background: #d9fdd3; }}
     .sender {{ font-size: 12px; font-weight: bold; color: #1f7a63; margin-bottom: 2px; }}
+    .quote {{ background: rgba(0,0,0,0.05); border-left: 3px solid #00a884; padding: 3px 7px; border-radius: 4px; font-size: 12px; color: #54656f; margin-bottom: 4px; }}
     .time {{ font-size: 10.5px; color: #667781; text-align: right; margin-top: 4px; }}
     .media-img {{ max-width: 300px; border-radius: 6px; display: block; margin-bottom: 4px; }}
     @media print {{ body {{ background: #fff; padding: 0; }} .container {{ box-shadow: none; border-radius: 0; }} }}
@@ -1073,14 +1329,22 @@ def generate_chat_html_export(chat_id):
             name = m["remitente_nombre"] or m["remitente_jid"] or "Desconocido"
             sender_html = f'<div class="sender">{html.escape(name)}</div>'
 
+        quote_html = ""
+        if m.get("quoted_body"):
+            quote_html = f'<div class="quote">{html.escape(m["quoted_body"])}</div>'
+
         media_html = ""
         if m.get("archivo_local"):
-            if m.get("tipo") == "image":
-                media_html = f'<img class="media-img" src="/{m["archivo_local"]}">'
+            rel_url = f'/{m["archivo_local"]}'
+            src_uri = (_file_to_data_uri(m["archivo_local"], m.get("mimetype") or "application/octet-stream") if embed_media else None) or rel_url
+            if m.get("tipo") in ("image", "sticker"):
+                media_html = f'<img class="media-img" src="{src_uri}">'
             elif m.get("tipo") in ("audio", "ptt"):
-                media_html = f'<audio controls src="/{m["archivo_local"]}"></audio>'
+                media_html = f'<audio controls src="{src_uri}"></audio>'
             else:
-                media_html = f'<div>📄 <a href="/{m["archivo_local"]}">{html.escape(m["archivo_local"].split("/")[-1])}</a></div>'
+                media_html = f'<div>📄 <a href="{rel_url}">{html.escape(m["archivo_local"].split("/")[-1])}</a></div>'
+        elif m.get("thumbnail") and str(m.get("thumbnail")).startswith("data:image"):
+            media_html = f'<img class="media-img" src="{m["thumbnail"]}">'
 
         time_str = m["fecha_utc"].split(" ")[1][:5] if m.get("fecha_utc") else ""
         raw_c = m.get("contenido") or ""
@@ -1089,6 +1353,7 @@ def generate_chat_html_export(chat_id):
         html_parts.append(f"""
         <div class="msg {cls}">
           {sender_html}
+          {quote_html}
           {media_html}
           {f'<div>{html.escape(content_clean)}</div>' if content_clean else ''}
           <div class="time">{time_str}</div>
@@ -1107,7 +1372,7 @@ class BackupServerHandler(BaseHTTPRequestHandler):
     def send_cors_headers(self):
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With, Range")
 
     def do_OPTIONS(self):
         self.send_response(200)
@@ -1122,6 +1387,51 @@ class BackupServerHandler(BaseHTTPRequestHandler):
         self.send_cors_headers()
         self.end_headers()
         self.wfile.write(response_bytes)
+
+    def _serve_file_with_range(self, filepath, mime_type):
+        """Sirve un archivo soportando peticiones HTTP Range (206 Partial Content) y streaming por bloques."""
+        file_size = os.path.getsize(filepath)
+        range_header = self.headers.get("Range")
+
+        start = 0
+        end = file_size - 1
+        status_code = 200
+
+        if range_header:
+            m = re.match(r"bytes=(\d*)-(\d*)", range_header)
+            if m:
+                start_str, end_str = m.groups()
+                if start_str:
+                    start = int(start_str)
+                if end_str:
+                    end = min(int(end_str), file_size - 1)
+                if start < file_size and start <= end:
+                    status_code = 206
+
+        length = end - start + 1
+        self.send_response(status_code)
+        self.send_header("Content-Type", mime_type)
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Content-Length", str(length))
+        if status_code == 206:
+            self.send_header("Content-Range", f"bytes {start}-{end}/{file_size}")
+        self.send_header("Cache-Control", "public, max-age=86400")
+        self.send_cors_headers()
+        self.end_headers()
+
+        chunk_size = 64 * 1024
+        with open(filepath, "rb") as f:
+            f.seek(start)
+            remaining = length
+            while remaining > 0:
+                chunk = f.read(min(chunk_size, remaining))
+                if not chunk:
+                    break
+                try:
+                    self.wfile.write(chunk)
+                except (ConnectionResetError, BrokenPipeError):
+                    break
+                remaining -= len(chunk)
 
     def do_GET(self):
         url = urlparse(self.path)
@@ -1150,16 +1460,27 @@ class BackupServerHandler(BaseHTTPRequestHandler):
             conn = db_manager.get_connection()
             cur = conn.cursor()
             query = """
+            WITH latest_msgs AS (
+                SELECT 
+                    chat_id,
+                    contenido AS last_msg,
+                    tipo AS last_tipo,
+                    timestamp AS last_ts,
+                    ROW_NUMBER() OVER (PARTITION BY chat_id ORDER BY timestamp DESC) AS rn
+                FROM mensajes
+                WHERE chat_id IS NOT NULL AND chat_id != 'status@broadcast'
+            )
             SELECT 
-                m.chat_id,
-                COALESCE(c.nombre, ct.nombre, ct.push_name, m.chat_id) AS display_name,
-                (SELECT contenido FROM mensajes WHERE chat_id = m.chat_id ORDER BY timestamp DESC LIMIT 1) AS last_msg,
-                (SELECT tipo FROM mensajes WHERE chat_id = m.chat_id ORDER BY timestamp DESC LIMIT 1) AS last_tipo,
-                (SELECT timestamp FROM mensajes WHERE chat_id = m.chat_id ORDER BY timestamp DESC LIMIT 1) AS last_ts
-            FROM (SELECT DISTINCT chat_id FROM mensajes WHERE chat_id IS NOT NULL AND chat_id != 'status@broadcast') m
-            LEFT JOIN chats c ON m.chat_id = c.chat_id
-            LEFT JOIN contactos ct ON m.chat_id = ct.contact_id
-            ORDER BY last_ts DESC
+                lm.chat_id,
+                COALESCE(c.nombre, ct.nombre, ct.push_name, lm.chat_id) AS display_name,
+                lm.last_msg,
+                lm.last_tipo,
+                lm.last_ts
+            FROM latest_msgs lm
+            LEFT JOIN chats c ON lm.chat_id = c.chat_id
+            LEFT JOIN contactos ct ON lm.chat_id = ct.contact_id
+            WHERE lm.rn = 1
+            ORDER BY lm.last_ts DESC
             """
             cur.execute(query)
             chats = [dict(row) for row in cur.fetchall()]
@@ -1191,6 +1512,9 @@ class BackupServerHandler(BaseHTTPRequestHandler):
                 m.duracion,
                 m.thumbnail,
                 m.estado_multimedia,
+                m.quoted_msg_id,
+                m.quoted_author,
+                m.quoted_body,
                 COALESCE(ct.nombre, ct.push_name, m.remitente) AS remitente_nombre,
                 m.remitente AS remitente_jid
             FROM mensajes m
@@ -1207,11 +1531,12 @@ class BackupServerHandler(BaseHTTPRequestHandler):
         elif url.path == "/api/export/html":
             params = parse_qs(url.query)
             chat_id = params.get("chat_id", [None])[0]
+            embed_media = params.get("embed", ["0"])[0] == "1"
             if not chat_id:
                 self.send_json(400, {"error": "Falta parámetro chat_id"})
                 return
 
-            html_content = generate_chat_html_export(chat_id)
+            html_content = generate_chat_html_export(chat_id, embed_media=embed_media)
             html_bytes = html_content.encode("utf-8")
             self.send_response(200)
             self.send_header("Content-type", "text/html; charset=utf-8")
@@ -1229,15 +1554,10 @@ class BackupServerHandler(BaseHTTPRequestHandler):
         elif url.path == "/api/backup/download":
             params = parse_qs(url.query)
             filename = os.path.basename(params.get("file", [""])[0])
-            filepath = os.path.join("backups", filename)
-            if os.path.exists(filepath) and os.path.isfile(filepath):
-                self.send_response(200)
-                self.send_header("Content-type", "application/octet-stream")
-                self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
-                self.send_header("Content-Length", str(os.path.getsize(filepath)))
-                self.end_headers()
-                with open(filepath, "rb") as f:
-                    self.wfile.write(f.read())
+            backups_root = os.path.abspath("backups")
+            filepath = os.path.abspath(os.path.join(backups_root, filename))
+            if filepath.startswith(backups_root + os.sep) and os.path.isfile(filepath):
+                self._serve_file_with_range(filepath, "application/octet-stream")
                 return
             else:
                 self.send_response(404)
@@ -1245,17 +1565,14 @@ class BackupServerHandler(BaseHTTPRequestHandler):
                 return
 
         elif url.path.startswith("/media/"):
-            rel_file_path = url.path.lstrip("/").replace("/", os.sep)
-            if os.path.exists(rel_file_path) and os.path.isfile(rel_file_path):
-                mime, _ = mimetypes.guess_type(rel_file_path)
+            decoded_path = unquote(url.path).lstrip("/")
+            media_root = os.path.abspath(media_manager.MEDIA_DIR)
+            abs_file_path = os.path.abspath(decoded_path)
+            # Prevenir vulnerabilidad de Path Traversal verificando que esté dentro de media/
+            if abs_file_path.startswith(media_root + os.sep) and os.path.isfile(abs_file_path):
+                mime, _ = mimetypes.guess_type(abs_file_path)
                 mime = mime or "application/octet-stream"
-                self.send_response(200)
-                self.send_header("Content-type", mime)
-                self.send_header("Cache-Control", "public, max-age=86400")
-                self.send_cors_headers()
-                self.end_headers()
-                with open(rel_file_path, "rb") as f:
-                    self.wfile.write(f.read())
+                self._serve_file_with_range(abs_file_path, mime)
                 return
             else:
                 self.send_response(404)
@@ -1299,6 +1616,12 @@ class BackupServerHandler(BaseHTTPRequestHandler):
                 self.send_json(200, {"status": "en_proceso"})
                 return
 
+            elif url.path == "/api/media/retry":
+                reset_count = db_manager.retry_failed_media()
+                media_manager.trigger_media_processing()
+                self.send_json(200, {"success": True, "reset_count": reset_count})
+                return
+
             self.send_response(404)
             self.end_headers()
         except Exception as e:
@@ -1311,6 +1634,7 @@ class BackupServerHandler(BaseHTTPRequestHandler):
 def run():
     db_manager.init_db()
     media_manager.ensure_media_dirs()
+    media_manager.trigger_media_processing()
 
     server = ThreadingHTTPServer(("127.0.0.1", PORT), BackupServerHandler)
     url = f"http://127.0.0.1:{PORT}"

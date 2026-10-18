@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WhatsApp Web - Respaldo Local Automático e Incremental
 // @namespace    http://tampermonkey.net/
-// @version      2.0.2
+// @version      2.1.0
 // @description  Captura pasiva de clave, descifrado local, sincronización incremental y multimedia a SQLite
 // @author       dbono
 // @match        https://web.whatsapp.com/*
@@ -106,13 +106,15 @@
 
     for (let i = 0; i < bytes.length; i++) {
       const b = bytes[i];
-      if ((b >= 32 && b <= 126) || (b >= 160 && b <= 255)) {
+      if ((b >= 32 && b <= 126) || b === 9 || b === 10 || b === 13 || (b >= 128 && b <= 255)) {
         cur.push(b);
       } else {
         if (cur.length >= 2) {
           try {
-            const s = new TextDecoder("utf-8").decode(new Uint8Array(cur)).trim();
-            if (s.length >= 2 && !/^[0-9a-f]{20,}$/i.test(s)) valid.push(s);
+            const s = new TextDecoder("utf-8", { fatal: false }).decode(new Uint8Array(cur)).replace(/\ufffd/g, "").trim();
+            if (s.length >= 2 && !/^[0-9a-f]{20,}$/i.test(s) && !/^[A-Za-z0-9+/=]{40,}$/.test(s)) {
+              valid.push(s);
+            }
           } catch (e) {}
         }
         cur = [];
@@ -120,8 +122,10 @@
     }
     if (cur.length >= 2) {
       try {
-        const s = new TextDecoder("utf-8").decode(new Uint8Array(cur)).trim();
-        if (s.length >= 2) valid.push(s);
+        const s = new TextDecoder("utf-8", { fatal: false }).decode(new Uint8Array(cur)).replace(/\ufffd/g, "").trim();
+        if (s.length >= 2 && !/^[0-9a-f]{20,}$/i.test(s) && !/^[A-Za-z0-9+/=]{40,}$/.test(s)) {
+          valid.push(s);
+        }
       } catch (e) {}
     }
     if (valid.length === 0) return "";
@@ -133,11 +137,12 @@
     if (!buf) return null;
     if (typeof buf === "string") return buf;
     const bytes = new Uint8Array(buf.buffer || buf);
-    let binary = "";
-    for (let i = 0; i < bytes.byteLength; i++) {
-      binary += String.fromCharCode(bytes[i]);
+    const chunkSize = 0x8000;
+    const chunks = [];
+    for (let i = 0; i < bytes.byteLength; i += chunkSize) {
+      chunks.push(String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize)));
     }
-    return window.btoa(binary);
+    return window.btoa(chunks.join(""));
   }
 
   function extractId(val) {
@@ -270,6 +275,8 @@
             } else if (rawBody && !isBinaryOrB64(rawBody)) {
               bodyText = rawBody;
             }
+          } else if (m.type === "revoked") {
+            bodyText = "🚫 Este mensaje fue eliminado";
           } else {
             bodyText = isBinaryOrB64(rawBody) ? "" : (rawBody || caption);
           }
@@ -305,6 +312,11 @@
             if (tB64) thumbnailStr = tB64.startsWith('data:image') ? tB64 : 'data:image/jpeg;base64,' + tB64;
           }
 
+          const qMsg = m.quotedMsg || {};
+          const quotedMsgId = extractId(m.quotedStanzaID || qMsg.id);
+          const quotedAuthor = extractId(m.quotedParticipant || qMsg.author || qMsg.from);
+          let quotedBody = qMsg.caption || (typeof qMsg.body === "string" && !isBinaryOrB64(qMsg.body) ? qMsg.body : "") || "";
+
           return {
             id: extractId(m.id),
             chatId: extractId(m.chatId),
@@ -323,7 +335,10 @@
             filename: m.filename || null,
             thumbnail: thumbnailStr,
             encFilehash: m.encFilehash ? bufferToBase64(m.encFilehash) : null,
-            filehash: m.filehash ? bufferToBase64(m.filehash) : null
+            filehash: m.filehash ? bufferToBase64(m.filehash) : null,
+            quotedMsgId: quotedMsgId,
+            quotedAuthor: quotedAuthor,
+            quotedBody: quotedBody
           };
         }));
 
@@ -401,12 +416,44 @@
     });
   }
 
-  async function getMessagesSince(db, minTimestamp, forceAll = false) {
-    const allMsgs = await getAllFromStore(db, "message");
+  function getMessagesSince(db, minTimestamp, forceAll = false) {
     if (forceAll || !minTimestamp || minTimestamp <= 0) {
-      return allMsgs;
+      return getAllFromStore(db, "message");
     }
-    return allMsgs.filter(m => (m.t || m.timestamp || 0) >= minTimestamp);
+    return new Promise((resolve) => {
+      try {
+        if (!db.objectStoreNames.contains("message")) return resolve([]);
+        const tx = db.transaction("message", "readonly");
+        const store = tx.objectStore("message");
+
+        if (store.indexNames && store.indexNames.contains("t")) {
+          const idx = store.index("t");
+          const range = IDBKeyRange.lowerBound(minTimestamp);
+          const req = idx.getAll(range);
+          req.onsuccess = () => resolve(req.result || []);
+          req.onerror = () => getAllFromStore(db, "message").then(all => resolve(all.filter(m => (m.t || m.timestamp || 0) >= minTimestamp)));
+          return;
+        }
+
+        const results = [];
+        const curReq = store.openCursor();
+        curReq.onsuccess = (e) => {
+          const cursor = e.target.result;
+          if (cursor) {
+            const val = cursor.value;
+            if ((val.t || val.timestamp || 0) >= minTimestamp) {
+              results.push(val);
+            }
+            cursor.continue();
+          } else {
+            resolve(results);
+          }
+        };
+        curReq.onerror = () => resolve([]);
+      } catch (e) {
+        resolve([]);
+      }
+    });
   }
 
   function createWidget() {

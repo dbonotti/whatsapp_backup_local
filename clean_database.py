@@ -1,54 +1,6 @@
-import sys
-import os
 import re
 import db_manager
-
-def extract_base64_jpeg(text):
-    if not text:
-        return None
-    if "/9j/" in text:
-        idx = text.find("/9j/")
-        candidate = text[idx:].strip()
-        m = re.match(r'^[A-Za-z0-9+/=]+', candidate)
-        if m and len(m.group(0)) > 50:
-            return f"data:image/jpeg;base64,{m.group(0)}"
-    return None
-
-def is_binary_or_base64_content(tipo, text):
-    if not text:
-        return True
-    t = text.strip()
-    if not t:
-        return True
-
-    # 1. Miniatura o imagen en base64
-    if "/9j/" in t or t.startswith("data:image"):
-        return True
-
-    # 2. Cadena base64 larga sin espacios (ruido de buffers / blobs)
-    if len(t) > 40 and " " not in t and re.match(r'^[A-Za-z0-9+/=_\-\*\&\"\'\(\)\%\;\:\$\^]+$', t):
-        return True
-
-    # 3. Audio / PTT: JIDs filtrados o ruido binario
-    if tipo in ("audio", "ptt"):
-        if any(domain in t for domain in ("@s.whatsapp.net", "@lid", "@g.us", "@c.us")):
-            return True
-        # Si son solo símbolos raros o caracteres de control
-        if not re.search(r'[a-zA-ZáéíóúÁÉÍÓÚñÑ]{3,}', t):
-            return True
-
-    # 4. Stickers: JIDs o hashes
-    if tipo == "sticker":
-        if any(domain in t for domain in ("@s.whatsapp.net", "@lid", "@g.us", "@c.us")):
-            return True
-        if len(t) <= 15 and " " not in t:
-            return True
-
-    # 5. Documentos con identificadores internos en lugar de nombre real
-    if tipo == "document" and len(t) > 50 and " " not in t and re.match(r'^[A-Za-z0-9_\-]+$', t):
-        return True
-
-    return False
+from db_manager import extract_base64_jpeg, is_binary_or_base64_content
 
 def clean_database():
     conn = db_manager.get_connection()

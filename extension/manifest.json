@@ -1,20 +1,8 @@
 {
   "manifest_version": 3,
   "name": "WhatsApp Backup Local & Incremental",
-  "version": "2.0.2",
+  "version": "2.1.0",
   "description": "Respaldo pasivo, seguro e incremental de WhatsApp Web a base de datos SQLite local",
-  "permissions": [
-    "declarativeNetRequest"
-  ],
-  "declarative_net_request": {
-    "rule_resources": [
-      {
-        "id": "ruleset_1",
-        "enabled": true,
-        "path": "rules.json"
-      }
-    ]
-  },
   "background": {
     "service_worker": "background.js"
   },

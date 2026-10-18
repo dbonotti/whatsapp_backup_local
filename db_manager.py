@@ -1,7 +1,7 @@
 import sqlite3
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 
 DB_FILE = "whatsapp_backup.db"
 
@@ -50,6 +50,7 @@ def init_db(db_path=DB_FILE):
     CREATE INDEX IF NOT EXISTS idx_mensajes_chat ON mensajes (chat_id);
     CREATE INDEX IF NOT EXISTS idx_mensajes_fecha ON mensajes (timestamp);
     CREATE INDEX IF NOT EXISTS idx_mensajes_tipo ON mensajes (tipo);
+    CREATE INDEX IF NOT EXISTS idx_mensajes_chat_ts ON mensajes (chat_id, timestamp DESC);
     """)
 
     # 2. Migraciones: Añadir columnas que puedan faltar en tablas existentes
@@ -75,7 +76,10 @@ def init_db(db_path=DB_FILE):
         "tamano": "INTEGER",
         "duracion": "REAL",
         "thumbnail": "TEXT",
-        "estado_multimedia": "TEXT DEFAULT 'none'"
+        "estado_multimedia": "TEXT DEFAULT 'none'",
+        "quoted_msg_id": "TEXT",
+        "quoted_author": "TEXT",
+        "quoted_body": "TEXT"
     }
 
     for col, col_type in columnas_nuevas.items():
@@ -191,11 +195,17 @@ def get_sync_status(db_path=DB_FILE):
     cur.execute("SELECT MAX(timestamp) FROM mensajes")
     max_ts = cur.fetchone()[0] or 0
 
-    cur.execute("SELECT COUNT(*) FROM multimedia WHERE estado = 'pendiente'")
+    cur.execute("SELECT COUNT(*) FROM multimedia WHERE estado = 'pendiente' AND intentos < 3")
     pending_media = cur.fetchone()[0]
 
     cur.execute("SELECT COUNT(*) FROM multimedia WHERE estado = 'descargado'")
     downloaded_media = cur.fetchone()[0]
+
+    cur.execute("SELECT COUNT(*) FROM multimedia WHERE estado = 'error' OR (estado = 'pendiente' AND intentos >= 3)")
+    failed_media = cur.fetchone()[0]
+
+    cur.execute("SELECT COUNT(*) FROM multimedia WHERE estado = 'expirado'")
+    expired_media = cur.fetchone()[0]
 
     conn.close()
 
@@ -205,7 +215,9 @@ def get_sync_status(db_path=DB_FILE):
         "total_contacts": total_contacts,
         "last_timestamp": max_ts,
         "pending_media": pending_media,
-        "downloaded_media": downloaded_media
+        "downloaded_media": downloaded_media,
+        "failed_media": failed_media,
+        "expired_media": expired_media
     }
 
 def extract_base64_jpeg(text):
@@ -341,7 +353,7 @@ def save_incremental_sync(data, db_path=DB_FILE):
         dt_str = None
         if ts and isinstance(ts, (int, float)):
             try:
-                dt_str = datetime.utcfromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+                dt_str = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
             except Exception:
                 pass
 
@@ -369,6 +381,13 @@ def save_incremental_sync(data, db_path=DB_FILE):
             body = body.replace("\ufffd", "")
             body = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', body).strip()
 
+        # Citas / respuestas (quotedMsg)
+        quoted_msg_id = extract_id(m.get("quotedMsgId") or m.get("quotedStanzaID"))
+        quoted_author = extract_id(m.get("quotedParticipant") or m.get("quotedAuthor"))
+        quoted_body = m.get("quotedBody") or ""
+        if quoted_body and is_binary_or_base64_content("chat", quoted_body):
+            quoted_body = ""
+
         # Metadatos multimedia
         media_key = m.get("mediaKey")
         direct_path = m.get("directPath")
@@ -393,24 +412,29 @@ def save_incremental_sync(data, db_path=DB_FILE):
         cur.execute("""
             INSERT INTO mensajes (
                 msg_id, chat_id, remitente, es_mio, fecha_utc, timestamp, 
-                tipo, contenido, mimetype, tamano, duracion, thumbnail, estado_multimedia
+                tipo, contenido, mimetype, tamano, duracion, thumbnail, estado_multimedia,
+                quoted_msg_id, quoted_author, quoted_body
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(msg_id) DO UPDATE SET
                 es_mio = excluded.es_mio,
-                contenido = excluded.contenido,
+                contenido = CASE WHEN excluded.contenido != '' THEN excluded.contenido ELSE mensajes.contenido END,
                 tipo = excluded.tipo,
                 mimetype = COALESCE(excluded.mimetype, mensajes.mimetype),
                 tamano = COALESCE(excluded.tamano, mensajes.tamano),
                 duracion = COALESCE(excluded.duracion, mensajes.duracion),
                 thumbnail = COALESCE(excluded.thumbnail, mensajes.thumbnail),
+                quoted_msg_id = COALESCE(excluded.quoted_msg_id, mensajes.quoted_msg_id),
+                quoted_author = COALESCE(excluded.quoted_author, mensajes.quoted_author),
+                quoted_body = COALESCE(NULLIF(excluded.quoted_body, ''), mensajes.quoted_body),
                 estado_multimedia = CASE 
                     WHEN mensajes.archivo_local IS NOT NULL THEN mensajes.estado_multimedia 
                     ELSE excluded.estado_multimedia 
                 END
         """, (
             mid, chat_id, sender, is_mine, dt_str, ts, 
-            m_type, body, mimetype, size, duration, thumbnail, estado_media
+            m_type, body, mimetype, size, duration, thumbnail, estado_media,
+            quoted_msg_id, quoted_author, quoted_body
         ))
         stats["messages_saved"] += 1
 
@@ -426,7 +450,7 @@ def save_incremental_sync(data, db_path=DB_FILE):
             """, (
                 mid, chat_id, m_type, mimetype, media_key, direct_path,
                 m.get("encFilehash"), m.get("filehash"), size, duration, filename,
-                datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+                datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
             ))
             if cur.rowcount > 0:
                 stats["media_enqueued"] += 1
@@ -434,6 +458,26 @@ def save_incremental_sync(data, db_path=DB_FILE):
     conn.commit()
     conn.close()
     return stats
+
+def retry_failed_media(db_path=DB_FILE):
+    """Restablece el contador de intentos de descargas fallidas (no expiradas) para reintentar."""
+    conn = get_connection(db_path)
+    cur = conn.cursor()
+    cur.execute("""
+        UPDATE multimedia
+        SET estado = 'pendiente', intentos = 0, error_msg = NULL
+        WHERE estado = 'error' OR (estado = 'pendiente' AND intentos >= 3)
+    """)
+    reset_count = cur.rowcount
+    cur.execute("""
+        UPDATE mensajes
+        SET estado_multimedia = 'pendiente'
+        WHERE msg_id IN (SELECT msg_id FROM multimedia WHERE estado = 'pendiente')
+          AND archivo_local IS NULL
+    """)
+    conn.commit()
+    conn.close()
+    return reset_count
 
 def search_full_text(query_str, chat_id=None, limit=50, db_path=DB_FILE):
     """Búsqueda de texto completo ultrarrápida usando SQLite FTS5."""

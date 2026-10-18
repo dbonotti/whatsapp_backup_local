@@ -98,13 +98,16 @@
 
     for (let i = 0; i < bytes.length; i++) {
       const b = bytes[i];
-      if ((b >= 32 && b <= 126) || (b >= 160 && b <= 255)) {
+      // Permitir ASCII imprimible (32..126), saltos de línea/tab (9, 10, 13) y todos los bytes UTF-8 multibyte (128..255)
+      if ((b >= 32 && b <= 126) || b === 9 || b === 10 || b === 13 || (b >= 128 && b <= 255)) {
         cur.push(b);
       } else {
         if (cur.length >= 2) {
           try {
-            const s = new TextDecoder("utf-8").decode(new Uint8Array(cur)).trim();
-            if (s.length >= 2 && !/^[0-9a-f]{20,}$/i.test(s)) valid.push(s);
+            const s = new TextDecoder("utf-8", { fatal: false }).decode(new Uint8Array(cur)).replace(/\ufffd/g, "").trim();
+            if (s.length >= 2 && !/^[0-9a-f]{20,}$/i.test(s) && !/^[A-Za-z0-9+/=]{40,}$/.test(s)) {
+              valid.push(s);
+            }
           } catch (e) {}
         }
         cur = [];
@@ -112,8 +115,10 @@
     }
     if (cur.length >= 2) {
       try {
-        const s = new TextDecoder("utf-8").decode(new Uint8Array(cur)).trim();
-        if (s.length >= 2) valid.push(s);
+        const s = new TextDecoder("utf-8", { fatal: false }).decode(new Uint8Array(cur)).replace(/\ufffd/g, "").trim();
+        if (s.length >= 2 && !/^[0-9a-f]{20,}$/i.test(s) && !/^[A-Za-z0-9+/=]{40,}$/.test(s)) {
+          valid.push(s);
+        }
       } catch (e) {}
     }
     if (valid.length === 0) return "";
@@ -125,11 +130,12 @@
     if (!buf) return null;
     if (typeof buf === "string") return buf;
     const bytes = new Uint8Array(buf.buffer || buf);
-    let binary = "";
-    for (let i = 0; i < bytes.byteLength; i++) {
-      binary += String.fromCharCode(bytes[i]);
+    const chunkSize = 0x8000;
+    const chunks = [];
+    for (let i = 0; i < bytes.byteLength; i += chunkSize) {
+      chunks.push(String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize)));
     }
-    return window.btoa(binary);
+    return window.btoa(chunks.join(""));
   }
 
   function extractId(val) {
@@ -234,7 +240,7 @@
         t: ch.t || ch.timestamp || null
       }));
 
-      // Extraer mensajes de forma segura (sin bugs de cursor)
+      // Extraer mensajes de forma segura y optimizada
       const minTimestamp = forceAll ? 0 : Math.max(0, lastTimestamp - 3600);
       const rawMessages = await getMessagesSince(db, minTimestamp, forceAll);
       db.close();
@@ -277,6 +283,8 @@
             } else if (rawBody && !isBinaryOrB64(rawBody)) {
               bodyText = rawBody;
             }
+          } else if (m.type === "revoked") {
+            bodyText = "🚫 Este mensaje fue eliminado";
           } else {
             bodyText = isBinaryOrB64(rawBody) ? "" : (rawBody || caption);
           }
@@ -312,6 +320,11 @@
             if (tB64) thumbnailStr = tB64.startsWith('data:image') ? tB64 : 'data:image/jpeg;base64,' + tB64;
           }
 
+          const qMsg = m.quotedMsg || {};
+          const quotedMsgId = extractId(m.quotedStanzaID || qMsg.id);
+          const quotedAuthor = extractId(m.quotedParticipant || qMsg.author || qMsg.from);
+          let quotedBody = qMsg.caption || (typeof qMsg.body === "string" && !isBinaryOrB64(qMsg.body) ? qMsg.body : "") || "";
+
           return {
             id: extractId(m.id),
             chatId: extractId(m.chatId),
@@ -330,7 +343,10 @@
             filename: m.filename || null,
             thumbnail: thumbnailStr,
             encFilehash: m.encFilehash ? bufferToBase64(m.encFilehash) : null,
-            filehash: m.filehash ? bufferToBase64(m.filehash) : null
+            filehash: m.filehash ? bufferToBase64(m.filehash) : null,
+            quotedMsgId: quotedMsgId,
+            quotedAuthor: quotedAuthor,
+            quotedBody: quotedBody
           };
         }));
 
@@ -383,7 +399,7 @@
   }
 
   // =========================================================================
-  // 5. ACCESO A INDEXEDDB (Robusto y sin errores de ordenamiento)
+  // 5. ACCESO A INDEXEDDB (Robusto y optimizado con índices/cursores)
   // =========================================================================
   function openIndexedDB(dbName) {
     return new Promise((resolve) => {
@@ -412,13 +428,46 @@
     });
   }
 
-  async function getMessagesSince(db, minTimestamp, forceAll = false) {
-    const allMsgs = await getAllFromStore(db, "message");
+  function getMessagesSince(db, minTimestamp, forceAll = false) {
     if (forceAll || !minTimestamp || minTimestamp <= 0) {
-      return allMsgs;
+      return getAllFromStore(db, "message");
     }
-    // Filtrar en memoria: instantáneo y sin depender del orden de claves de IndexedDB
-    return allMsgs.filter(m => (m.t || m.timestamp || 0) >= minTimestamp);
+    return new Promise((resolve) => {
+      try {
+        if (!db.objectStoreNames.contains("message")) return resolve([]);
+        const tx = db.transaction("message", "readonly");
+        const store = tx.objectStore("message");
+
+        // Si existe un índice por timestamp ('t'), usarlo directamente con IDBKeyRange
+        if (store.indexNames && store.indexNames.contains("t")) {
+          const idx = store.index("t");
+          const range = IDBKeyRange.lowerBound(minTimestamp);
+          const req = idx.getAll(range);
+          req.onsuccess = () => resolve(req.result || []);
+          req.onerror = () => getAllFromStore(db, "message").then(all => resolve(all.filter(m => (m.t || m.timestamp || 0) >= minTimestamp)));
+          return;
+        }
+
+        // Iterar con cursor sin cargar todo el historial en un solo array gigante
+        const results = [];
+        const curReq = store.openCursor();
+        curReq.onsuccess = (e) => {
+          const cursor = e.target.result;
+          if (cursor) {
+            const val = cursor.value;
+            if ((val.t || val.timestamp || 0) >= minTimestamp) {
+              results.push(val);
+            }
+            cursor.continue();
+          } else {
+            resolve(results);
+          }
+        };
+        curReq.onerror = () => resolve([]);
+      } catch (e) {
+        resolve([]);
+      }
+    });
   }
 
   // =========================================================================

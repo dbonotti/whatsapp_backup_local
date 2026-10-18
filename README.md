@@ -10,14 +10,13 @@ Sistema de respaldo pasivo, incremental y 100% seguro para WhatsApp Web. Permite
 ## 📁 Estructura del Proyecto
 
 ```text
-whatsapp_backup_clean/
+whatsapp_backup_local/
 ├── extension/                       # Extensión para el navegador (Manifest V3)
 │   ├── manifest.json
-│   ├── rules.json                   # Reglas declarativas de red (omisión de CSP)
 │   ├── background.js                # Service worker puente hacia el servidor local
 │   ├── bridge.js                    # Conector seguro entre contextos de página
 │   └── content.js                   # Extractor pasivo incremental y widget visual
-├── whatsapp_viewer.py               # Servidor local HTTP, API y visor web interactivo
+├── whatsapp_viewer.py               # Servidor local HTTP (con Range 206), API y visor web
 ├── db_manager.py                    # Gestor de base de datos SQLite (WAL mode, FTS5)
 ├── media_manager.py                 # Descifrador de multimedia (HKDF-SHA256 + AES-256-CBC)
 ├── clean_database.py                # Utilidad de optimización y mantenimiento
@@ -59,21 +58,21 @@ Haz doble clic en **`iniciar_visor.bat`** (o en **`iniciar_visor_segundo_plano.v
 
 ### Paso 4: Abrir WhatsApp Web
 1. Ingresa a [https://web.whatsapp.com](https://web.whatsapp.com) e inicia sesión con cualquier cuenta de WhatsApp vinculando el código QR.
-2. Observarás un widget flotante en la esquina inferior derecha: **"Backup WhatsApp"**.
+2. Observarás un widget flotante en la esquina inferior izquierda: **"Backup WhatsApp"**.
 3. Abre cualquier conversación para que la extensión capture la clave criptográfica de la sesión (`🎯 ¡Clave maestra verificada!`).
 4. Haz clic en:
    - **`[Todo (Media)]`**: Para realizar la primera sincronización completa del historial y encolar la descarga y descifrado de imágenes, audios y documentos.
    - **`[Novedades]`**: Para sincronizar únicamente los mensajes y novedades de la última hora.
-   *(La extensión también realiza sincronizaciones automáticas periódicas cada 10 minutos de forma desatendida)*.
+   *(La extensión también realiza sincronizaciones automáticas periódicas cada 60 segundos de forma desatendida)*.
 
 ---
 
 ## ✨ Características Principales
 
-- **Visor Web Réplica WhatsApp**: Interfaz limpia, avatares dinámicos con paleta de colores, marcas de tiempo, estados de lectura `✓✓` y burbujas diferenciadas (verde claro para mensajes enviados por ti a la derecha, blanco para recibidos a la izquierda).
-- **Descifrado Multimedia Real**: Descarga archivos `.enc` de los CDN oficiales de WhatsApp y los descifra localmente mediante HKDF-SHA256 y AES-256-CBC, organizándolos en `media/images/`, `media/audio/`, `media/documents/`, etc.
+- **Visor Web Réplica WhatsApp (Modo Claro y Modo Oscuro)**: Interfaz limpia con soporte nativo para tema oscuro (`🌙`/`☀️`), avatares dinámicos, citas/respuestas (`quotedMsg`) interactivas, estados de lectura `✓✓` y carga progresiva paginada para conversaciones con miles de mensajes.
+- **Descifrado Multimedia Real y Streaming HTTP Range (`206 Partial Content`)**: Descarga continua de archivos `.enc` desde la CDN de WhatsApp, descifrado mediante HKDF-SHA256 y AES-256-CBC, y panel de estado (`🎬 Media`) con botón para reintentar descargas fallidas. Permite adelantar y retroceder pistas de audio y video sin esperas.
 - **Reproductor de Voz Avanzado**: Selector de velocidad (`1x` ➔ `1.5x` ➔ `2x`) y reproducción continua automática al finalizar una nota de voz.
 - **Filtros Dinámicos**: Píldoras para filtrar por tipo (`📷 Fotos`, `🎤 Audios`, `📄 Documentos`, `🎬 Videos`) y selectores de fecha (`Desde` / `Hasta`).
 - **Búsqueda Instantánea FTS5**: Motor de texto completo en SQLite con soporte para acentos y diacríticos (`remove_diacritics 1`).
-- **Exportación a HTML Autónomo**: Botón para descargar cualquier conversación en un único archivo `.html` estilizado para compartir, archivar o imprimir (`Ctrl + P`).
-- **Copias de Seguridad Manuales Consistentes**: Botón en la cabecera para generar un respaldo puntual de la base de datos SQLite en `backups/` mediante la API nativa `sqlite3.Connection.backup()`.
+- **Exportación a HTML Ligero o Autónomo**: Botones para exportar cualquier conversación en HTML ligero o en un único archivo `.html` autónomo (`📦 Exportar Autónomo`) con imágenes y audios incrustados en Base64.
+- **Copias de Seguridad Manuales Consistentes**: Botón en la cabecera (`💾 Backup`) para generar y descargar respaldos puntuales de la base de datos SQLite en `backups/` mediante `sqlite3.Connection.backup()`.

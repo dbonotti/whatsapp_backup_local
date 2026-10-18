@@ -7,10 +7,14 @@ import mimetypes
 import threading
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
-from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.kdf.hkdf import HKDF
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-from cryptography.hazmat.backends import default_backend
+try:
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+    from cryptography.hazmat.backends import default_backend
+    HAS_CRYPTO = True
+except ImportError:
+    HAS_CRYPTO = False
 
 from db_manager import DB_FILE, get_connection
 
@@ -246,42 +250,48 @@ class MediaDownloadWorker:
         threading.Thread(target=self._run_batch, args=(limit,), daemon=True).start()
 
     def _run_batch(self, limit):
+        if not HAS_CRYPTO:
+            print("[MediaWorker] Aviso: Instala 'cryptography' (pip install -r requirements.txt) para descifrar multimedia.")
+            with self._lock:
+                self.is_running = False
+            return
         try:
-            conn = get_connection(self.db_path)
-            cur = conn.cursor()
-            cur.execute("""
-                SELECT msg_id, media_key, direct_path, tipo, mimetype, nombre_archivo
-                FROM multimedia
-                WHERE estado = 'pendiente' AND intentos < 3 AND media_key IS NOT NULL AND direct_path IS NOT NULL
-                ORDER BY rowid DESC
-                LIMIT ?
-            """, (limit,))
-            rows = [dict(r) for r in cur.fetchall()]
-            conn.close()
+            while True:
+                conn = get_connection(self.db_path)
+                cur = conn.cursor()
+                cur.execute("""
+                    SELECT msg_id, media_key, direct_path, tipo, mimetype, nombre_archivo
+                    FROM multimedia
+                    WHERE estado = 'pendiente' AND intentos < 3 AND media_key IS NOT NULL AND direct_path IS NOT NULL
+                    ORDER BY rowid DESC
+                    LIMIT ?
+                """, (limit,))
+                rows = [dict(r) for r in cur.fetchall()]
+                conn.close()
 
-            if not rows:
-                return
+                if not rows:
+                    break
 
-            print(f"[MediaWorker] Procesando lote de {len(rows)} archivos multimedia...")
-            futures = []
-            for r in rows:
-                f = self.executor.submit(
-                    download_and_decrypt,
-                    r["msg_id"],
-                    r["media_key"],
-                    r["direct_path"],
-                    r["tipo"],
-                    r["mimetype"],
-                    r["nombre_archivo"],
-                    self.db_path
-                )
-                futures.append(f)
+                print(f"[MediaWorker] Procesando lote de {len(rows)} archivos multimedia...")
+                futures = []
+                for r in rows:
+                    f = self.executor.submit(
+                        download_and_decrypt,
+                        r["msg_id"],
+                        r["media_key"],
+                        r["direct_path"],
+                        r["tipo"],
+                        r["mimetype"],
+                        r["nombre_archivo"],
+                        self.db_path
+                    )
+                    futures.append(f)
 
-            for f in futures:
-                try:
-                    f.result()
-                except Exception as e:
-                    print(f"[MediaWorker] Error en hilo de descarga: {e}")
+                for f in futures:
+                    try:
+                        f.result()
+                    except Exception as e:
+                        print(f"[MediaWorker] Error en hilo de descarga: {e}")
 
         finally:
             with self._lock:
