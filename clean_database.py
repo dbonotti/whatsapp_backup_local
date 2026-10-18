@@ -1,7 +1,7 @@
 import re
 from datetime import datetime
 import db_manager
-from db_manager import extract_base64_jpeg, is_binary_or_base64_content, clean_protobuf_text
+from db_manager import extract_base64_jpeg, is_binary_or_base64_content, clean_protobuf_text, build_contact_map, resolve_mentions_in_text
 
 def clean_database():
     conn = db_manager.get_connection()
@@ -37,7 +37,8 @@ def clean_database():
         conn.commit()
     print(f"   -> Remitentes de grupo corregidos: {len(sender_updates)}")
 
-    print("2. Limpiando prefijos Protobuf, JIDs, binarios y ajustando zona horaria local...")
+    print("2. Limpiando prefijos Protobuf, menciones @ID, binarios y ajustando zona horaria local...")
+    contact_map = build_contact_map(cur)
     cur.execute("SELECT msg_id, tipo, contenido, thumbnail, timestamp, fecha_utc FROM mensajes")
     all_msgs = [dict(r) for r in cur.fetchall()]
 
@@ -73,6 +74,8 @@ def clean_database():
             if extracted_thumb and not existing_thumb:
                 thumbnail_updates.append((extracted_thumb, mid))
             c = ""
+        else:
+            c = resolve_mentions_in_text(c, contact_map)
 
         if c != orig:
             content_updates.append((c, mid))

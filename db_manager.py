@@ -246,6 +246,32 @@ def clean_protobuf_text(text):
     t = re.sub(r'^[A-Za-z0-9]{1,2}\r?\n[A-Za-z](?=[A-ZÁÉÍÓÚÑ¿¡][a-záéíóúñ])', '', t)
     return t.strip()
 
+def build_contact_map(cur):
+    """Construye un diccionario {id_o_numero: nombre} a partir de la tabla contactos."""
+    cur.execute("SELECT contact_id, numero, COALESCE(nombre, push_name) AS display FROM contactos WHERE COALESCE(nombre, push_name) IS NOT NULL")
+    cmap = {}
+    for row in cur.fetchall():
+        disp = row["display"]
+        if not disp:
+            continue
+        cid = row["contact_id"] or ""
+        num = row["numero"] or (cid.split("@")[0] if "@" in cid else "")
+        if cid:
+            cmap[cid] = disp
+        if num:
+            cmap[num] = disp
+    return cmap
+
+def resolve_mentions_in_text(text, contact_map):
+    """Reemplaza menciones @123456789 por @Nombre Contacto si existe en el mapa de contactos."""
+    if not text or "@" not in text or not contact_map:
+        return text
+    def _repl(match):
+        num = match.group(1)
+        name = contact_map.get(num) or contact_map.get(f"{num}@lid") or contact_map.get(f"{num}@c.us") or contact_map.get(f"{num}@s.whatsapp.net")
+        return f"@{name}" if name else match.group(0)
+    return re.sub(r'@(\d{8,20})\b', _repl, text)
+
 def is_binary_or_base64_content(tipo, text):
     if not text or not isinstance(text, str):
         return True
@@ -360,6 +386,7 @@ def save_incremental_sync(data, db_path=DB_FILE):
         stats["chats_saved"] += 1
 
     # 3. Mensajes
+    contact_map = build_contact_map(cur)
     messages = data.get("messages", [])
     for m in messages:
         mid = extract_id(m.get("id"))
@@ -423,12 +450,19 @@ def save_incremental_sync(data, db_path=DB_FILE):
             cand = raw_body or caption
             body = "" if is_binary_or_base64_content(m_type, cand) else cand
 
+        if body:
+            body = resolve_mentions_in_text(body, contact_map)
+
         # Citas / respuestas (quotedMsg)
         quoted_msg_id = extract_id(m.get("quotedMsgId") or m.get("quotedStanzaID"))
         quoted_author = extract_id(m.get("quotedParticipant") or m.get("quotedAuthor"))
+        if quoted_author and quoted_author in contact_map:
+            quoted_author = contact_map[quoted_author]
         quoted_body = clean_protobuf_text(m.get("quotedBody") or "")
         if quoted_body and is_binary_or_base64_content("chat", quoted_body):
             quoted_body = ""
+        elif quoted_body:
+            quoted_body = resolve_mentions_in_text(quoted_body, contact_map)
 
         # Metadatos multimedia
         media_key = m.get("mediaKey")

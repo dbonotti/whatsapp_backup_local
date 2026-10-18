@@ -1033,7 +1033,7 @@ HTML_UI = """<!DOCTYPE html>
 
         let quoteHtml = '';
         if (m.quoted_body || m.quoted_msg_id) {
-          const qAuthor = m.quoted_author ? formatFriendlyName(null, m.quoted_author) : 'Mensaje citado';
+          const qAuthor = m.quoted_author ? formatFriendlyName(m.quoted_author, m.quoted_author) : 'Mensaje citado';
           const qText = cleanText(m.quoted_body) || '📎 Archivo / Mensaje citado';
           const clickAttr = m.quoted_msg_id ? `onclick="scrollToMessage('${escapeHtml(m.quoted_msg_id)}')"` : '';
           quoteHtml = `
@@ -1307,6 +1307,7 @@ def generate_chat_html_export(chat_id, embed_media=False):
     row = cur.fetchone()
     display_name = row["display_name"] if row else chat_id
 
+    contact_map = db_manager.build_contact_map(cur)
     cur.execute("""
         SELECT 
             m.msg_id, m.es_mio, m.fecha_utc, m.timestamp, m.tipo, m.contenido,
@@ -1372,7 +1373,8 @@ def generate_chat_html_export(chat_id, embed_media=False):
 
         quote_html = ""
         if m.get("quoted_body"):
-            quote_html = f'<div class="quote">{html.escape(m["quoted_body"])}</div>'
+            q_body_resolved = db_manager.resolve_mentions_in_text(m["quoted_body"], contact_map)
+            quote_html = f'<div class="quote">{html.escape(q_body_resolved)}</div>'
 
         media_html = ""
         if m.get("archivo_local"):
@@ -1389,7 +1391,7 @@ def generate_chat_html_export(chat_id, embed_media=False):
 
         time_str = m["fecha_utc"].split(" ")[1][:5] if m.get("fecha_utc") else ""
         raw_c = m.get("contenido") or ""
-        content_clean = "" if db_manager.is_binary_or_base64_content(m.get("tipo"), raw_c) else raw_c.replace("\ufffd", "").strip()
+        content_clean = "" if db_manager.is_binary_or_base64_content(m.get("tipo"), raw_c) else db_manager.resolve_mentions_in_text(raw_c.replace("\ufffd", "").strip(), contact_map)
 
         html_parts.append(f"""
         <div class="msg {cls}">
@@ -1500,6 +1502,7 @@ class BackupServerHandler(BaseHTTPRequestHandler):
         elif url.path == "/api/chats":
             conn = db_manager.get_connection()
             cur = conn.cursor()
+            contact_map = db_manager.build_contact_map(cur)
             query = """
             WITH latest_msgs AS (
                 SELECT 
@@ -1537,6 +1540,9 @@ class BackupServerHandler(BaseHTTPRequestHandler):
             cur.execute(query)
             chats = [dict(row) for row in cur.fetchall()]
             conn.close()
+            for ch in chats:
+                if ch.get("last_msg"):
+                    ch["last_msg"] = db_manager.resolve_mentions_in_text(ch["last_msg"], contact_map)
             self.send_json(200, chats)
             return
 
@@ -1549,6 +1555,7 @@ class BackupServerHandler(BaseHTTPRequestHandler):
 
             conn = db_manager.get_connection()
             cur = conn.cursor()
+            contact_map = db_manager.build_contact_map(cur)
             query = """
             SELECT 
                 m.msg_id,
@@ -1579,6 +1586,18 @@ class BackupServerHandler(BaseHTTPRequestHandler):
             cur.execute(query, (chat_id,))
             messages = [dict(row) for row in cur.fetchall()]
             conn.close()
+            for m in messages:
+                if m.get("contenido"):
+                    m["contenido"] = db_manager.resolve_mentions_in_text(m["contenido"], contact_map)
+                if m.get("quoted_body"):
+                    m["quoted_body"] = db_manager.resolve_mentions_in_text(m["quoted_body"], contact_map)
+                qa = m.get("quoted_author")
+                if qa:
+                    qa_key = qa.split("@")[0]
+                    if qa in contact_map:
+                        m["quoted_author"] = contact_map[qa]
+                    elif qa_key in contact_map:
+                        m["quoted_author"] = contact_map[qa_key]
             self.send_json(200, messages)
             return
 
