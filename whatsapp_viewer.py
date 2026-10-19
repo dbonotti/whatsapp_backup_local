@@ -933,6 +933,7 @@ HTML_UI = """<!DOCTYPE html>
         const data = await res.json();
         const prevLastTs = lastSyncData.last_timestamp;
         const prevTotalMsgs = lastSyncData.total_messages;
+        const prevValidMsgs = lastSyncData.valid_messages;
         const prevDownloadedMedia = lastSyncData.downloaded_media;
         const prevExpiredMedia = lastSyncData.expired_media;
         lastSyncData = data;
@@ -942,7 +943,7 @@ HTML_UI = """<!DOCTYPE html>
         if (document.getElementById('media-modal').style.display === 'flex') {
           renderMediaStats(data);
         }
-        const messagesChanged = prevLastTs !== undefined && (data.last_timestamp !== prevLastTs || data.total_messages !== prevTotalMsgs);
+        const messagesChanged = prevLastTs !== undefined && (data.last_timestamp !== prevLastTs || data.total_messages !== prevTotalMsgs || data.valid_messages !== prevValidMsgs);
         const mediaChanged = prevDownloadedMedia !== undefined && (data.downloaded_media !== prevDownloadedMedia || data.expired_media !== prevExpiredMedia);
         // Si llegaron nuevos mensajes durante la sincronización en segundo plano, reordenar la lista de chats automáticamente
         if (messagesChanged) {
@@ -1719,7 +1720,9 @@ class BackupServerHandler(BaseHTTPRequestHandler):
             return
 
         elif url.path == "/api/sync/status":
-            status = db_manager.get_sync_status()
+            params = parse_qs(url.query)
+            include_ids = params.get("include_ids", ["0"])[0] == "1"
+            status = db_manager.get_sync_status(include_ids=include_ids)
             self.send_json(200, status)
             return
 

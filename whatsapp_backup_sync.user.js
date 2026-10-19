@@ -16,13 +16,15 @@
   'use strict';
 
   const BACKEND_URL = "http://127.0.0.1:8080";
-  const AUTO_SYNC_INTERVAL_MS = 60000;
+  const AUTO_SYNC_INTERVAL_MS = 20000;
   const BATCH_SIZE = 500;
   const DECRYPT_CHUNK_SIZE = 50;
 
   let isSyncing = false;
   let autoSyncTimer = null;
   let verifiedKeyData = null;
+  let knownMessageKeys = null;
+  let lastIdbMessageCount = -1;
 
   console.log("%c[BackupWA Userscript] Iniciando interceptor pasivo de respaldo local...", "color: #00a884; font-weight: bold; font-size: 13px;");
 
@@ -202,26 +204,48 @@
     return candidates;
   }
 
+  function stripProtobufLengthPrefix(chunk) {
+    if (!chunk || chunk.length < 2) return chunk;
+    for (let idx = 0; idx <= Math.min(2, chunk.length - 2); idx++) {
+      if (chunk[idx] === 10) {
+        const lenRes = readVarint(chunk, idx + 1);
+        if (lenRes && lenRes.val > 0 && Math.abs((chunk.length - lenRes.pos) - lenRes.val) <= 2) {
+          return chunk.slice(lenRes.pos);
+        }
+      }
+    }
+    const firstLen = readVarint(chunk, 0);
+    if (firstLen && firstLen.val > 0 && firstLen.pos < chunk.length && (chunk.length - firstLen.pos) === firstLen.val) {
+      return chunk.slice(firstLen.pos);
+    }
+    return chunk;
+  }
+
   function extractTextFromBuffer(buffer) {
     const bytes = new Uint8Array(buffer);
-    const protoCandidates = extractProtobufStrings(bytes, 0);
-    if (protoCandidates.length > 0) {
-      protoCandidates.sort((a, b) => b.score - a.score);
-      return protoCandidates[0].text;
+    for (let offset = 0; offset <= Math.min(6, bytes.length - 2); offset++) {
+      const protoCandidates = extractProtobufStrings(offset === 0 ? bytes : bytes.subarray(offset), 0);
+      if (protoCandidates.length > 0) {
+        protoCandidates.sort((a, b) => b.score - a.score);
+        if (protoCandidates[0].score >= 1000 || offset === 0) {
+          return protoCandidates[0].text;
+        }
+      }
     }
 
     const valid = [];
     let cur = [];
-    for (let i = 0; i < bytes.length; i++) {
-      const b = bytes[i];
+    for (let i = 0; i <= bytes.length; i++) {
+      const b = i < bytes.length ? bytes[i] : 0;
       if ((b >= 32 && b <= 126) || b === 9 || b === 10 || b === 13 || (b >= 128 && b <= 255)) {
         cur.push(b);
       } else {
-        if (cur.length >= 2) {
+        if (cur.length >= 1) {
           try {
-            let s = new TextDecoder("utf-8", { fatal: true }).decode(new Uint8Array(cur)).trim();
+            const stripped = stripProtobufLengthPrefix(new Uint8Array(cur));
+            let s = new TextDecoder("utf-8", { fatal: true }).decode(stripped).trim();
             s = s.replace(/^[a-zA-Z0-9]{1,2}\r?\n[\x20-\x7e]/, "").trim();
-            if (s.length >= 2 && !isGarbageString(s)) valid.push(s);
+            if (s.length >= 1 && !isGarbageString(s)) valid.push(s);
           } catch (e) {}
         }
         cur = [];
@@ -299,8 +323,12 @@
     try {
       let lastTimestamp = 0;
       try {
-        const statusData = await backendFetch("/api/sync/status");
+        const needIds = knownMessageKeys === null ? "?include_ids=1" : "";
+        const statusData = await backendFetch(`/api/sync/status${needIds}`);
         lastTimestamp = statusData.last_timestamp || 0;
+        if (knownMessageKeys === null && Array.isArray(statusData.synced_msg_ids)) {
+          knownMessageKeys = new Set(statusData.synced_msg_ids);
+        }
       } catch (backendErr) {
         console.warn("[BackupWA] Servidor local no disponible:", backendErr);
         updateWidgetStatus("error", "Servidor local desconectado");
@@ -515,10 +543,62 @@
     });
   }
 
-  function getMessagesSince(db, minTimestamp, forceAll = false) {
-    if (forceAll || !minTimestamp || minTimestamp <= 0) {
-      return getAllFromStore(db, "message");
-    }
+  function getStoreCount(db, storeName) {
+    return new Promise((resolve) => {
+      try {
+        if (!db.objectStoreNames.contains(storeName)) return resolve(0);
+        const tx = db.transaction(storeName, "readonly");
+        const store = tx.objectStore(storeName);
+        const req = store.count();
+        req.onsuccess = () => resolve(req.result || 0);
+        req.onerror = () => resolve(0);
+      } catch (e) {
+        resolve(0);
+      }
+    });
+  }
+
+  function getAllKeysFromStore(db, storeName) {
+    return new Promise((resolve) => {
+      try {
+        if (!db.objectStoreNames.contains(storeName)) return resolve([]);
+        const tx = db.transaction(storeName, "readonly");
+        const store = tx.objectStore(storeName);
+        const req = store.getAllKeys();
+        req.onsuccess = () => resolve(req.result || []);
+        req.onerror = () => resolve([]);
+      } catch (e) {
+        resolve([]);
+      }
+    });
+  }
+
+  function getRecordsByKeys(db, storeName, keys) {
+    if (!keys || keys.length === 0) return Promise.resolve([]);
+    return new Promise((resolve) => {
+      try {
+        if (!db.objectStoreNames.contains(storeName)) return resolve([]);
+        const tx = db.transaction(storeName, "readonly");
+        const store = tx.objectStore(storeName);
+        const results = [];
+        let pending = keys.length;
+        for (const key of keys) {
+          const req = store.get(key);
+          req.onsuccess = () => {
+            if (req.result) results.push(req.result);
+            if (--pending === 0) resolve(results);
+          };
+          req.onerror = () => {
+            if (--pending === 0) resolve(results);
+          };
+        }
+      } catch (e) {
+        resolve([]);
+      }
+    });
+  }
+
+  function getRecentMessagesOnly(db, minTimestamp) {
     return new Promise((resolve) => {
       try {
         if (!db.objectStoreNames.contains("message")) return resolve([]);
@@ -553,6 +633,46 @@
         resolve([]);
       }
     });
+  }
+
+  async function getMessagesSince(db, minTimestamp, forceAll = false) {
+    if (forceAll || !minTimestamp || minTimestamp <= 0) {
+      const allKeys = await getAllKeysFromStore(db, "message");
+      knownMessageKeys = new Set(allKeys.map(k => extractId(k)));
+      lastIdbMessageCount = allKeys.length;
+      return getAllFromStore(db, "message");
+    }
+
+    const recentMsgs = await getRecentMessagesOnly(db, minTimestamp);
+    const allKeys = await getAllKeysFromStore(db, "message");
+
+    let scrolledMsgs = [];
+    if (knownMessageKeys === null) {
+      knownMessageKeys = new Set();
+    }
+
+    const newKeys = allKeys.filter(k => !knownMessageKeys.has(extractId(k)));
+    if (newKeys.length > 0) {
+      console.log(`[BackupWA] Detectados ${newKeys.length} mensajes en IndexedDB pendientes de respaldo (scroll hacia arriba o historial).`);
+      scrolledMsgs = await getRecordsByKeys(db, "message", newKeys);
+      for (const k of newKeys) {
+        knownMessageKeys.add(extractId(k));
+      }
+    }
+    lastIdbMessageCount = allKeys.length;
+
+    if (scrolledMsgs.length === 0) return recentMsgs;
+
+    const mergedMap = new Map();
+    for (const m of recentMsgs) {
+      const id = extractId(m.id);
+      if (id) mergedMap.set(id, m);
+    }
+    for (const m of scrolledMsgs) {
+      const id = extractId(m.id);
+      if (id) mergedMap.set(id, m);
+    }
+    return Array.from(mergedMap.values());
   }
 
   function createWidget() {
@@ -618,6 +738,8 @@
     }
   }
 
+  let scrollSyncTimer = null;
+
   function init() {
     setupCryptoInterceptor();
 
@@ -626,6 +748,15 @@
     } else {
       window.addEventListener("DOMContentLoaded", createWidget);
     }
+
+    window.addEventListener("scroll", () => {
+      if (verifiedKeyData && !isSyncing) {
+        clearTimeout(scrollSyncTimer);
+        scrollSyncTimer = setTimeout(() => {
+          triggerSync(true, false);
+        }, 2500);
+      }
+    }, { capture: true, passive: true });
 
     if (autoSyncTimer) clearInterval(autoSyncTimer);
     autoSyncTimer = setInterval(() => {

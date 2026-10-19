@@ -1,13 +1,15 @@
 (function() {
   'use strict';
 
-  const AUTO_SYNC_INTERVAL_MS = 60000; // Sincroniza en segundo plano cada 60 segundos
+  const AUTO_SYNC_INTERVAL_MS = 20000; // Sincroniza en segundo plano cada 20 segundos
   const BATCH_SIZE = 500; // Enviar en bloques para no saturar memoria
   const DECRYPT_CHUNK_SIZE = 50; // Descifrado en paralelo por lotes
 
   let isSyncing = false;
   let autoSyncTimer = null;
   let verifiedKeyData = null; // { key, algName, algorithm }
+  let knownMessageKeys = null; // Set en memoria de IDs de mensajes en IndexedDB
+  let lastIdbMessageCount = -1; // Último conteo ultraligero (store.count()) de IndexedDB
 
   console.log("%c[BackupWA Extension] Iniciando interceptor pasivo de respaldo local...", "color: #00a884; font-weight: bold; font-size: 13px;");
 
@@ -205,29 +207,53 @@
     return candidates;
   }
 
+  function stripProtobufLengthPrefix(chunk) {
+    if (!chunk || chunk.length < 2) return chunk;
+    // Caso 1: Tag 0x0a (\n, field 1) en posición 0, 1 o 2 seguido de varint de longitud L
+    for (let idx = 0; idx <= Math.min(2, chunk.length - 2); idx++) {
+      if (chunk[idx] === 10) {
+        const lenRes = readVarint(chunk, idx + 1);
+        if (lenRes && lenRes.val > 0 && Math.abs((chunk.length - lenRes.pos) - lenRes.val) <= 2) {
+          return chunk.slice(lenRes.pos);
+        }
+      }
+    }
+    // Caso 2: El primer byte (o varint) es exactamente la longitud restante del string
+    const firstLen = readVarint(chunk, 0);
+    if (firstLen && firstLen.val > 0 && firstLen.pos < chunk.length && (chunk.length - firstLen.pos) === firstLen.val) {
+      return chunk.slice(firstLen.pos);
+    }
+    return chunk;
+  }
+
   function extractTextFromBuffer(buffer) {
     const bytes = new Uint8Array(buffer);
-    // 1. Primero usar el parser estructurado de Protobuf (elimina por completo prefijos de longitud como "a\n9" o "r\nJ")
-    const protoCandidates = extractProtobufStrings(bytes, 0);
-    if (protoCandidates.length > 0) {
-      protoCandidates.sort((a, b) => b.score - a.score);
-      return protoCandidates[0].text;
+    // 1. Primero usar el parser estructurado de Protobuf (probando offset 0..6 por si hay cabecera de versión)
+    for (let offset = 0; offset <= Math.min(6, bytes.length - 2); offset++) {
+      const protoCandidates = extractProtobufStrings(offset === 0 ? bytes : bytes.subarray(offset), 0);
+      if (protoCandidates.length > 0) {
+        protoCandidates.sort((a, b) => b.score - a.score);
+        if (protoCandidates[0].score >= 1000 || offset === 0) {
+          return protoCandidates[0].text;
+        }
+      }
     }
 
-    // 2. Fallback seguro si el buffer no empieza en el offset 0 del Protobuf
+    // 2. Fallback seguro incluyendo el vaciado al final del buffer (i <= bytes.length)
     const valid = [];
     let cur = [];
-    for (let i = 0; i < bytes.length; i++) {
-      const b = bytes[i];
+    for (let i = 0; i <= bytes.length; i++) {
+      const b = i < bytes.length ? bytes[i] : 0;
       if ((b >= 32 && b <= 126) || b === 9 || b === 10 || b === 13 || (b >= 128 && b <= 255)) {
         cur.push(b);
       } else {
         if (cur.length >= 1) {
           try {
-            let s = new TextDecoder("utf-8", { fatal: true }).decode(new Uint8Array(cur)).trim();
+            const stripped = stripProtobufLengthPrefix(new Uint8Array(cur));
+            let s = new TextDecoder("utf-8", { fatal: true }).decode(stripped).trim();
             // Limpiar prefijos residuales de cabecera Protobuf (ej. "a\n9Texto")
             s = s.replace(/^[a-zA-Z0-9]{1,2}\r?\n[\x20-\x7e]/, "").trim();
-            if (s.length >= 2 && !isGarbageString(s)) valid.push(s);
+            if (s.length >= 1 && !isGarbageString(s)) valid.push(s);
           } catch (e) {}
         }
         cur = [];
@@ -315,9 +341,13 @@
       let downloadedMediaCount = 0;
 
       try {
-        const statusData = await backendFetch("/api/sync/status");
+        const needIds = knownMessageKeys === null ? "?include_ids=1" : "";
+        const statusData = await backendFetch(`/api/sync/status${needIds}`);
         lastTimestamp = statusData.last_timestamp || 0;
         downloadedMediaCount = statusData.downloaded_media || 0;
+        if (knownMessageKeys === null && Array.isArray(statusData.synced_msg_ids)) {
+          knownMessageKeys = new Set(statusData.synced_msg_ids);
+        }
       } catch (backendErr) {
         console.warn("[BackupWA] Servidor local no disponible:", backendErr);
         updateWidgetStatus("error", "Servidor local desconectado");
@@ -540,10 +570,62 @@
     });
   }
 
-  function getMessagesSince(db, minTimestamp, forceAll = false) {
-    if (forceAll || !minTimestamp || minTimestamp <= 0) {
-      return getAllFromStore(db, "message");
-    }
+  function getStoreCount(db, storeName) {
+    return new Promise((resolve) => {
+      try {
+        if (!db.objectStoreNames.contains(storeName)) return resolve(0);
+        const tx = db.transaction(storeName, "readonly");
+        const store = tx.objectStore(storeName);
+        const req = store.count();
+        req.onsuccess = () => resolve(req.result || 0);
+        req.onerror = () => resolve(0);
+      } catch (e) {
+        resolve(0);
+      }
+    });
+  }
+
+  function getAllKeysFromStore(db, storeName) {
+    return new Promise((resolve) => {
+      try {
+        if (!db.objectStoreNames.contains(storeName)) return resolve([]);
+        const tx = db.transaction(storeName, "readonly");
+        const store = tx.objectStore(storeName);
+        const req = store.getAllKeys();
+        req.onsuccess = () => resolve(req.result || []);
+        req.onerror = () => resolve([]);
+      } catch (e) {
+        resolve([]);
+      }
+    });
+  }
+
+  function getRecordsByKeys(db, storeName, keys) {
+    if (!keys || keys.length === 0) return Promise.resolve([]);
+    return new Promise((resolve) => {
+      try {
+        if (!db.objectStoreNames.contains(storeName)) return resolve([]);
+        const tx = db.transaction(storeName, "readonly");
+        const store = tx.objectStore(storeName);
+        const results = [];
+        let pending = keys.length;
+        for (const key of keys) {
+          const req = store.get(key);
+          req.onsuccess = () => {
+            if (req.result) results.push(req.result);
+            if (--pending === 0) resolve(results);
+          };
+          req.onerror = () => {
+            if (--pending === 0) resolve(results);
+          };
+        }
+      } catch (e) {
+        resolve([]);
+      }
+    });
+  }
+
+  function getRecentMessagesOnly(db, minTimestamp) {
     return new Promise((resolve) => {
       try {
         if (!db.objectStoreNames.contains("message")) return resolve([]);
@@ -580,6 +662,46 @@
         resolve([]);
       }
     });
+  }
+
+  async function getMessagesSince(db, minTimestamp, forceAll = false) {
+    if (forceAll || !minTimestamp || minTimestamp <= 0) {
+      const allKeys = await getAllKeysFromStore(db, "message");
+      knownMessageKeys = new Set(allKeys.map(k => extractId(k)));
+      lastIdbMessageCount = allKeys.length;
+      return getAllFromStore(db, "message");
+    }
+
+    const recentMsgs = await getRecentMessagesOnly(db, minTimestamp);
+    const allKeys = await getAllKeysFromStore(db, "message");
+
+    let scrolledMsgs = [];
+    if (knownMessageKeys === null) {
+      knownMessageKeys = new Set();
+    }
+
+    const newKeys = allKeys.filter(k => !knownMessageKeys.has(extractId(k)));
+    if (newKeys.length > 0) {
+      console.log(`[BackupWA] Detectados ${newKeys.length} mensajes en IndexedDB pendientes de respaldo (scroll hacia arriba o historial).`);
+      scrolledMsgs = await getRecordsByKeys(db, "message", newKeys);
+      for (const k of newKeys) {
+        knownMessageKeys.add(extractId(k));
+      }
+    }
+    lastIdbMessageCount = allKeys.length;
+
+    if (scrolledMsgs.length === 0) return recentMsgs;
+
+    const mergedMap = new Map();
+    for (const m of recentMsgs) {
+      const id = extractId(m.id);
+      if (id) mergedMap.set(id, m);
+    }
+    for (const m of scrolledMsgs) {
+      const id = extractId(m.id);
+      if (id) mergedMap.set(id, m);
+    }
+    return Array.from(mergedMap.values());
   }
 
   // =========================================================================
@@ -651,6 +773,8 @@
   // =========================================================================
   // 7. INICIALIZACIÓN
   // =========================================================================
+  let scrollSyncTimer = null;
+
   function init() {
     setupCryptoInterceptor();
 
@@ -659,6 +783,16 @@
     } else {
       window.addEventListener("DOMContentLoaded", createWidget);
     }
+
+    // Al hacer scroll en un chat de WhatsApp Web, sincronizar automáticamente los mensajes cargados 2.5s después
+    window.addEventListener("scroll", () => {
+      if (verifiedKeyData && !isSyncing) {
+        clearTimeout(scrollSyncTimer);
+        scrollSyncTimer = setTimeout(() => {
+          triggerSync(true, false);
+        }, 2500);
+      }
+    }, { capture: true, passive: true });
 
     if (autoSyncTimer) clearInterval(autoSyncTimer);
     autoSyncTimer = setInterval(() => {

@@ -178,7 +178,7 @@ def extract_id(val):
         return val.get("_serialized") or val.get("id") or str(val)
     return str(val) if val is not None else None
 
-def get_sync_status(db_path=DB_FILE):
+def get_sync_status(db_path=DB_FILE, include_ids=False):
     """Devuelve el estado de sincronización actual y el último timestamp registrado."""
     conn = get_connection(db_path)
     cur = conn.cursor()
@@ -207,10 +207,12 @@ def get_sync_status(db_path=DB_FILE):
     cur.execute("SELECT COUNT(*) FROM multimedia WHERE estado = 'expirado'")
     expired_media = cur.fetchone()[0]
 
-    conn.close()
+    cur.execute("SELECT COUNT(*) FROM mensajes WHERE contenido IS NOT NULL AND contenido != ''")
+    valid_messages = cur.fetchone()[0]
 
-    return {
+    result = {
         "total_messages": total_messages,
+        "valid_messages": valid_messages,
         "total_chats": total_chats,
         "total_contacts": total_contacts,
         "last_timestamp": max_ts,
@@ -219,6 +221,17 @@ def get_sync_status(db_path=DB_FILE):
         "failed_media": failed_media,
         "expired_media": expired_media
     }
+
+    if include_ids:
+        cur.execute("""
+            SELECT msg_id FROM mensajes
+            WHERE msg_id IS NOT NULL
+              AND NOT (tipo = 'chat' AND (contenido IS NULL OR contenido = '') AND (quoted_body IS NULL OR quoted_body = ''))
+        """)
+        result["synced_msg_ids"] = [r[0] for r in cur.fetchall()]
+
+    conn.close()
+    return result
 
 def extract_base64_jpeg(text):
     if not text or not isinstance(text, str):
