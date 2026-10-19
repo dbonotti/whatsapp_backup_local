@@ -924,7 +924,7 @@ HTML_UI = """<!DOCTYPE html>
       initTheme();
       await updateSyncStatus();
       await loadChats();
-      setInterval(updateSyncStatus, 15000);
+      setInterval(updateSyncStatus, 5000);
     }
 
     async function updateSyncStatus() {
@@ -933,6 +933,8 @@ HTML_UI = """<!DOCTYPE html>
         const data = await res.json();
         const prevLastTs = lastSyncData.last_timestamp;
         const prevTotalMsgs = lastSyncData.total_messages;
+        const prevDownloadedMedia = lastSyncData.downloaded_media;
+        const prevExpiredMedia = lastSyncData.expired_media;
         lastSyncData = data;
         document.getElementById('syncStatusText').textContent = `${data.total_messages.toLocaleString()} msgs`;
         document.getElementById('dbStatsText').textContent = 
@@ -940,12 +942,62 @@ HTML_UI = """<!DOCTYPE html>
         if (document.getElementById('media-modal').style.display === 'flex') {
           renderMediaStats(data);
         }
+        const messagesChanged = prevLastTs !== undefined && (data.last_timestamp !== prevLastTs || data.total_messages !== prevTotalMsgs);
+        const mediaChanged = prevDownloadedMedia !== undefined && (data.downloaded_media !== prevDownloadedMedia || data.expired_media !== prevExpiredMedia);
         // Si llegaron nuevos mensajes durante la sincronización en segundo plano, reordenar la lista de chats automáticamente
-        if (prevLastTs !== undefined && (data.last_timestamp !== prevLastTs || data.total_messages !== prevTotalMsgs)) {
+        if (messagesChanged) {
           await loadChats();
+        }
+        // Si el chat abierto recibió nuevos mensajes o completó descargas multimedia, refrescarlo sin perder la posición de lectura
+        if ((messagesChanged || mediaChanged) && selectedChatId) {
+          await refreshActiveChatSilently();
         }
       } catch (e) {
         document.getElementById('syncStatusText').textContent = 'Desconectado';
+      }
+    }
+
+    async function refreshActiveChatSilently() {
+      if (!selectedChatId) return;
+      const container = document.getElementById('messages-container');
+      // No interrumpir si el usuario está reproduciendo un audio o video
+      const isPlayingMedia = Array.from(container.querySelectorAll('audio, video')).some(el => !el.paused);
+      if (isPlayingMedia) return;
+
+      const chatIdSnapshot = selectedChatId;
+      try {
+        const res = await fetch(`/api/messages?chat_id=${encodeURIComponent(chatIdSnapshot)}`);
+        const freshMessages = await res.json();
+        if (selectedChatId !== chatIdSnapshot) return;
+
+        let hasChanged = freshMessages.length !== currentMessages.length;
+        if (!hasChanged) {
+          for (let i = freshMessages.length - 1; i >= 0; i--) {
+            const a = freshMessages[i];
+            const b = currentMessages[i];
+            if (a.msg_id !== b.msg_id || a.archivo_local !== b.archivo_local || a.estado_multimedia !== b.estado_multimedia || a.contenido !== b.contenido) {
+              hasChanged = true;
+              break;
+            }
+          }
+        }
+        if (!hasChanged) return;
+
+        const wasNearBottom = (container.scrollHeight - container.scrollTop - container.clientHeight) < 80;
+        const prevScrollTop = container.scrollTop;
+        const prevFilteredLen = filteredMessages.length;
+
+        currentMessages = freshMessages;
+        filteredMessages = computeFilteredMessages(currentMessages);
+        const delta = Math.max(0, filteredMessages.length - prevFilteredLen);
+        renderedCount = Math.max(PAGE_SIZE, renderedCount + delta);
+
+        renderMessages(filteredMessages, null, !wasNearBottom);
+        if (!wasNearBottom) {
+          container.scrollTop = prevScrollTop;
+        }
+      } catch (e) {
+        // Ignorar errores transitorios en segundo plano
       }
     }
 
@@ -1286,11 +1338,11 @@ HTML_UI = """<!DOCTYPE html>
       applyClientFilters();
     }
 
-    function applyClientFilters() {
+    function computeFilteredMessages(messages) {
       const fromVal = document.getElementById('filterDateFrom').value;
       const toVal = document.getElementById('filterDateTo').value;
 
-      let filtered = currentMessages;
+      let filtered = messages;
 
       if (activeMediaFilter) {
         if (activeMediaFilter === 'audio') {
@@ -1312,8 +1364,11 @@ HTML_UI = """<!DOCTYPE html>
         const toTs = new Date(toVal + 'T23:59:59').getTime() / 1000;
         filtered = filtered.filter(m => (m.timestamp || 0) <= toTs);
       }
+      return filtered;
+    }
 
-      filteredMessages = filtered;
+    function applyClientFilters() {
+      filteredMessages = computeFilteredMessages(currentMessages);
       renderedCount = PAGE_SIZE;
       renderMessages(filteredMessages);
     }
