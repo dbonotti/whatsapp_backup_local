@@ -102,22 +102,62 @@ HTML_UI = """<!DOCTYPE html>
     .brand-title { display: flex; align-items: center; gap: 8px; }
     .brand-title svg { fill: #25d366; flex-shrink: 0; }
     
-    .sidebar-actions { display: flex; align-items: center; gap: 5px; }
-    .btn-header-action {
-      border: 1px solid var(--border-strong);
-      background: var(--bg-sidebar);
-      border-radius: 14px;
-      padding: 4px 9px;
-      font-size: 11.5px;
-      font-weight: 600;
-      color: var(--text-primary);
+    .sidebar-actions { display: flex; align-items: center; gap: 8px; }
+    .menu-container { position: relative; display: flex; align-items: center; }
+    .btn-kebab {
+      width: 36px;
+      height: 36px;
+      border-radius: 50%;
+      border: none;
+      background: transparent;
+      color: var(--text-secondary);
       cursor: pointer;
       display: flex;
       align-items: center;
-      gap: 4px;
-      transition: all 0.15s;
+      justify-content: center;
+      transition: background 0.15s, color 0.15s;
     }
-    .btn-header-action:hover { background: var(--bg-hover); border-color: var(--accent); color: var(--accent); }
+    .btn-kebab:hover, .btn-kebab.active { background: var(--bg-hover); color: var(--text-primary); }
+    .btn-kebab svg { width: 20px; height: 20px; fill: currentColor; }
+
+    .dropdown-menu {
+      position: absolute;
+      top: calc(100% + 6px);
+      right: 0;
+      min-width: 235px;
+      background: var(--bg-sidebar);
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      box-shadow: 0 4px 18px rgba(11, 20, 26, 0.24);
+      padding: 6px 0;
+      display: none;
+      flex-direction: column;
+      z-index: 1500;
+      animation: menuFadeIn 0.14s ease-out;
+    }
+    .dropdown-menu.open { display: flex; }
+    @keyframes menuFadeIn {
+      from { opacity: 0; transform: translateY(-6px) scale(0.97); }
+      to { opacity: 1; transform: translateY(0) scale(1); }
+    }
+    .dropdown-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 18px;
+      font-size: 13.8px;
+      font-weight: 400;
+      color: var(--text-primary);
+      background: none;
+      border: none;
+      width: 100%;
+      text-align: left;
+      cursor: pointer;
+      transition: background 0.12s;
+      white-space: nowrap;
+    }
+    .dropdown-item:hover { background: var(--bg-hover); }
+    .dropdown-divider { height: 1px; background: var(--border-color); margin: 4px 0; }
 
     .sync-badge { 
       font-size: 11.5px; 
@@ -137,7 +177,7 @@ HTML_UI = """<!DOCTYPE html>
     .search-box-wrapper { display: flex; position: relative; align-items: center; }
     .search-box { 
       width: 100%; 
-      padding: 8px 12px 8px 36px; 
+      padding: 8px 34px 8px 36px; 
       border-radius: 8px; 
       border: 1px solid var(--border-color); 
       background: var(--bg-input); 
@@ -148,6 +188,24 @@ HTML_UI = """<!DOCTYPE html>
     }
     .search-box:focus { background: var(--bg-sidebar); border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
     .search-icon-svg { position: absolute; left: 10px; fill: var(--text-secondary); width: 16px; height: 16px; pointer-events: none; }
+    .search-clear-btn {
+      position: absolute;
+      right: 8px;
+      border: none;
+      background: none;
+      color: var(--text-secondary);
+      cursor: pointer;
+      width: 22px;
+      height: 22px;
+      border-radius: 50%;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      font-size: 13px;
+      line-height: 1;
+      transition: background 0.15s, color 0.15s;
+    }
+    .search-clear-btn:hover { background: var(--bg-hover); color: var(--text-primary); }
     
     .search-mode-tabs { display: flex; gap: 6px; font-size: 12px; }
     .tab-btn { 
@@ -533,12 +591,29 @@ HTML_UI = """<!DOCTYPE html>
           <span>WhatsApp Backup</span>
         </div>
         <div class="sidebar-actions">
-          <button class="btn-header-action" id="btnTheme" onclick="toggleTheme()" title="Cambiar modo claro/oscuro">🌙</button>
-          <button class="btn-header-action" onclick="openMediaModal()" title="Estado de descargas multimedia">🎬 Media</button>
-          <button class="btn-header-action" onclick="openBackupModal()" title="Gestionar copias de respaldo de SQLite">💾 Backup</button>
           <div class="sync-badge" id="syncStatusBadge" onclick="openMediaModal()" title="Ver estado de sincronización y multimedia">
             <div class="sync-dot"></div>
             <span id="syncStatusText">Conectado</span>
+          </div>
+          <div class="menu-container">
+            <button class="btn-kebab" id="globalMenuBtn" onclick="toggleDropdown('globalDropdown', this, event)" title="Menú de opciones globales">
+              <svg viewBox="0 0 24 24"><path d="M12 7a2 2 0 1 0-.001-4.001A2 2 0 0 0 12 7zm0 2a2 2 0 1 0-.001 3.999A2 2 0 0 0 12 9zm0 6a2 2 0 1 0-.001 3.999A2 2 0 0 0 12 15z"/></svg>
+            </button>
+            <div class="dropdown-menu" id="globalDropdown">
+              <button class="dropdown-item" onclick="closeAllDropdowns(); openMediaModal();">
+                <span>🎬</span>
+                <span>Estado de multimedia</span>
+              </button>
+              <button class="dropdown-item" onclick="closeAllDropdowns(); openBackupModal();">
+                <span>💾</span>
+                <span>Copias de seguridad (Backup)</span>
+              </button>
+              <div class="dropdown-divider"></div>
+              <button class="dropdown-item" onclick="toggleTheme(); closeAllDropdowns();">
+                <span id="themeMenuIcon">🌙</span>
+                <span id="themeMenuText">Modo oscuro</span>
+              </button>
+            </div>
           </div>
         </div>
       </div>
@@ -547,6 +622,7 @@ HTML_UI = """<!DOCTYPE html>
         <div class="search-box-wrapper">
           <svg class="search-icon-svg" viewBox="0 0 24 24"><path d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
           <input type="text" id="searchInput" class="search-box" placeholder="Buscar un chat o iniciar uno nuevo..." oninput="handleSearchInput()">
+          <button type="button" id="searchClearBtn" class="search-clear-btn" onclick="clearSearchInput()" title="Limpiar texto de búsqueda">✕</button>
         </div>
         <div class="search-mode-tabs">
           <button class="tab-btn active" id="tabChats" onclick="setSearchMode('chats')">Chats</button>
@@ -569,12 +645,30 @@ HTML_UI = """<!DOCTYPE html>
           </div>
         </div>
         <div class="header-actions">
-          <button class="btn-chat-action" onclick="exportCurrentChat(false)" title="Exportar chat a HTML ligero">📥 Exportar HTML</button>
-          <button class="btn-chat-action" onclick="exportCurrentChat(true)" title="Exportar chat con imágenes/audios incrustados en un único archivo autónomo">📦 Exportar Autónomo</button>
+          <div class="menu-container">
+            <button class="btn-kebab" id="chatMenuBtn" onclick="toggleDropdown('chatDropdown', this, event)" title="Opciones del chat">
+              <svg viewBox="0 0 24 24"><path d="M12 7a2 2 0 1 0-.001-4.001A2 2 0 0 0 12 7zm0 2a2 2 0 1 0-.001 3.999A2 2 0 0 0 12 9zm0 6a2 2 0 1 0-.001 3.999A2 2 0 0 0 12 15z"/></svg>
+            </button>
+            <div class="dropdown-menu" id="chatDropdown">
+              <button class="dropdown-item" onclick="closeAllDropdowns(); toggleChatFilterBar();">
+                <span>📅</span>
+                <span id="chatFilterMenuText">Buscar por fecha y multimedia</span>
+              </button>
+              <div class="dropdown-divider"></div>
+              <button class="dropdown-item" onclick="closeAllDropdowns(); exportCurrentChat(false);">
+                <span>📥</span>
+                <span>Exportar chat a HTML (ligero)</span>
+              </button>
+              <button class="dropdown-item" onclick="closeAllDropdowns(); exportCurrentChat(true);">
+                <span>📦</span>
+                <span>Exportar autónomo (con multimedia)</span>
+              </button>
+            </div>
+          </div>
         </div>
       </div>
 
-      <!-- Barra de Filtros del Chat -->
+      <!-- Barra de Filtros del Chat (desplegable desde el menú de 3 puntos) -->
       <div id="chat-filter-bar" style="display: none;">
         <div class="filter-pills">
           <span class="filter-pill active" onclick="setMediaFilter(null, this)">Todos</span>
@@ -588,6 +682,7 @@ HTML_UI = """<!DOCTYPE html>
           <input type="date" id="filterDateFrom" class="date-input" onchange="applyDateFilter()">
           <span>Hasta:</span>
           <input type="date" id="filterDateTo" class="date-input" onchange="applyDateFilter()">
+          <button type="button" class="filter-pill" onclick="closeChatFilterBar()" title="Cerrar y limpiar filtros" style="margin-left: 4px;">✕ Cerrar</button>
         </div>
       </div>
       
@@ -667,17 +762,81 @@ HTML_UI = """<!DOCTYPE html>
       return prefix + encodeURIComponent(String(rawId)).replace(/[^a-zA-Z0-9_-]/g, '_');
     }
 
+    function updateThemeMenuLabel(isDark) {
+      const iconEl = document.getElementById('themeMenuIcon');
+      const textEl = document.getElementById('themeMenuText');
+      if (iconEl) iconEl.textContent = isDark ? '☀️' : '🌙';
+      if (textEl) textEl.textContent = isDark ? 'Modo claro' : 'Modo oscuro';
+    }
+
     function toggleTheme() {
       const isDark = document.body.classList.toggle('dark');
       localStorage.setItem('wa_backup_theme', isDark ? 'dark' : 'light');
-      document.getElementById('btnTheme').textContent = isDark ? '☀️' : '🌙';
+      updateThemeMenuLabel(isDark);
     }
 
     function initTheme() {
       const saved = localStorage.getItem('wa_backup_theme');
-      if (saved === 'dark') {
+      const isDark = saved === 'dark';
+      if (isDark) {
         document.body.classList.add('dark');
-        document.getElementById('btnTheme').textContent = '☀️';
+      }
+      updateThemeMenuLabel(isDark);
+    }
+
+    function closeAllDropdowns() {
+      document.querySelectorAll('.dropdown-menu.open').forEach(el => el.classList.remove('open'));
+      document.querySelectorAll('.btn-kebab.active').forEach(el => el.classList.remove('active'));
+    }
+
+    function toggleDropdown(menuId, btnEl, event) {
+      if (event) event.stopPropagation();
+      const menu = document.getElementById(menuId);
+      if (!menu) return;
+      const isOpen = menu.classList.contains('open');
+      closeAllDropdowns();
+      if (!isOpen) {
+        menu.classList.add('open');
+        if (btnEl) btnEl.classList.add('active');
+      }
+    }
+
+    document.addEventListener('click', (e) => {
+      if (!e.target.closest('.menu-container')) {
+        closeAllDropdowns();
+      }
+    });
+
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        closeAllDropdowns();
+      }
+    });
+
+    function toggleChatFilterBar() {
+      const bar = document.getElementById('chat-filter-bar');
+      if (!bar) return;
+      const isHidden = bar.style.display === 'none' || !bar.style.display;
+      if (isHidden) {
+        bar.style.display = 'flex';
+        const menuText = document.getElementById('chatFilterMenuText');
+        if (menuText) menuText.textContent = 'Ocultar barra de filtros';
+      } else {
+        closeChatFilterBar();
+      }
+    }
+
+    function closeChatFilterBar() {
+      const bar = document.getElementById('chat-filter-bar');
+      if (bar) bar.style.display = 'none';
+      const menuText = document.getElementById('chatFilterMenuText');
+      if (menuText) menuText.textContent = 'Buscar por fecha y multimedia';
+      if (activeMediaFilter !== null || document.getElementById('filterDateFrom').value || document.getElementById('filterDateTo').value) {
+        activeMediaFilter = null;
+        document.querySelectorAll('#chat-filter-bar .filter-pills .filter-pill').forEach((el, idx) => el.classList.toggle('active', idx === 0));
+        document.getElementById('filterDateFrom').value = '';
+        document.getElementById('filterDateTo').value = '';
+        applyClientFilters();
       }
     }
 
@@ -793,7 +952,11 @@ HTML_UI = """<!DOCTYPE html>
     async function loadChats() {
       const res = await fetch('/api/chats');
       allChats = await res.json();
-      renderChats(allChats);
+      if (document.getElementById('searchInput').value.trim()) {
+        handleSearchInput();
+      } else {
+        renderChats(allChats);
+      }
     }
 
     function renderChats(chats) {
@@ -850,8 +1013,20 @@ HTML_UI = """<!DOCTYPE html>
       }
     }
 
+    function clearSearchInput() {
+      const input = document.getElementById('searchInput');
+      input.value = '';
+      handleSearchInput();
+      input.focus();
+    }
+
     function handleSearchInput() {
-      const query = document.getElementById('searchInput').value.trim();
+      const input = document.getElementById('searchInput');
+      const query = input.value.trim();
+      const clearBtn = document.getElementById('searchClearBtn');
+      if (clearBtn) {
+        clearBtn.style.display = input.value.length > 0 ? 'flex' : 'none';
+      }
       if (currentMode === 'chats') {
         const q = query.toLowerCase();
         const filtered = allChats.filter(c => {
@@ -905,9 +1080,11 @@ HTML_UI = """<!DOCTYPE html>
     async function selectChat(chat, scrollToMsgId = null) {
       selectedChatId = chat.chat_id;
       activeMediaFilter = null;
-      document.querySelectorAll('.filter-pill').forEach((el, idx) => el.classList.toggle('active', idx === 0));
+      document.querySelectorAll('#chat-filter-bar .filter-pills .filter-pill').forEach((el, idx) => el.classList.toggle('active', idx === 0));
       document.getElementById('filterDateFrom').value = '';
       document.getElementById('filterDateTo').value = '';
+      const menuText = document.getElementById('chatFilterMenuText');
+      if (menuText) menuText.textContent = 'Buscar por fecha y multimedia';
 
       document.querySelectorAll('.chat-item').forEach(el => el.classList.remove('active'));
       const activeEl = document.getElementById(safeDomId('chat-', chat.chat_id));
@@ -915,7 +1092,7 @@ HTML_UI = """<!DOCTYPE html>
 
       document.getElementById('empty-state').style.display = 'none';
       document.getElementById('chat-header').style.display = 'flex';
-      document.getElementById('chat-filter-bar').style.display = 'flex';
+      document.getElementById('chat-filter-bar').style.display = 'none';
       document.getElementById('messages-container').style.display = 'flex';
 
       const friendlyTitle = formatFriendlyName(chat.display_name, chat.chat_id);
@@ -1100,7 +1277,7 @@ HTML_UI = """<!DOCTYPE html>
     // Filtros multimedia en el chat
     function setMediaFilter(type, el) {
       activeMediaFilter = type;
-      document.querySelectorAll('.filter-pill').forEach(pill => pill.classList.remove('active'));
+      document.querySelectorAll('#chat-filter-bar .filter-pills .filter-pill').forEach(pill => pill.classList.remove('active'));
       el.classList.add('active');
       applyClientFilters();
     }
