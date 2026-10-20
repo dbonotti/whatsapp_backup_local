@@ -396,6 +396,8 @@ HTML_UI = """<!DOCTYPE html>
       font-weight: 600; 
       margin-bottom: 2px; 
     }
+    .msg-forwarded { display: flex; align-items: center; gap: 4px; font-size: 12.2px; font-style: italic; color: var(--text-muted); margin-bottom: 2px; user-select: none; }
+    .msg-forwarded svg { width: 14px; height: 14px; fill: currentColor; flex-shrink: 0; }
     .msg-quote {
       background: var(--bg-quote);
       border-left: 4px solid var(--accent);
@@ -983,7 +985,7 @@ HTML_UI = """<!DOCTYPE html>
           for (let i = freshMessages.length - 1; i >= 0; i--) {
             const a = freshMessages[i];
             const b = currentMessages[i];
-            if (a.msg_id !== b.msg_id || a.archivo_local !== b.archivo_local || a.estado_multimedia !== b.estado_multimedia || a.contenido !== b.contenido) {
+            if (a.msg_id !== b.msg_id || a.archivo_local !== b.archivo_local || a.estado_multimedia !== b.estado_multimedia || a.contenido !== b.contenido || a.reenviado !== b.reenviado) {
               hasChanged = true;
               break;
             }
@@ -1268,6 +1270,16 @@ HTML_UI = """<!DOCTYPE html>
           senderHtml = `<div class="msg-sender" style="color: ${senderColor};">${escapeHtml(senderDisplayName)}</div>`;
         }
 
+        let forwardedHtml = '';
+        if (m.reenviado && m.reenviado > 0) {
+          const isMany = m.reenviado >= 5;
+          const fwdLabel = isMany ? 'Reenviado muchas veces' : 'Reenviado';
+          const fwdIcon = isMany
+            ? `<svg viewBox="0 0 20 16"><path d="M8.5 3.5L13 8l-4.5 4.5V9.8c-3.2 0-5.4 1.1-6.8 3.7 0.7-3.6 2.6-6.2 6.8-6.9V3.5zm5.5 0L18.5 8 14 12.5v-2l2.5-2.5L14 5.5v-2z"/></svg>`
+            : `<svg viewBox="0 0 16 16"><path d="M9.5 3.5L14 8l-4.5 4.5V9.8c-3.5 0-6 1.1-7.5 3.7 0.8-3.6 2.9-6.2 7.5-6.9V3.5z"/></svg>`;
+          forwardedHtml = `<div class="msg-forwarded">${fwdIcon}<span>${fwdLabel}</span></div>`;
+        }
+
         let quoteHtml = '';
         if (m.quoted_body || m.quoted_msg_id) {
           const qAuthor = m.quoted_author ? formatFriendlyName(m.quoted_author, m.quoted_author) : 'Mensaje citado';
@@ -1307,6 +1319,7 @@ HTML_UI = """<!DOCTYPE html>
 
         bubble.innerHTML = `
           ${senderHtml}
+          ${forwardedHtml}
           ${quoteHtml}
           ${mediaHtml}
           ${cleanBody ? `<div class="msg-text">${escapeHtml(cleanBody)}</div>` : ''}
@@ -1552,7 +1565,7 @@ def generate_chat_html_export(chat_id, embed_media=False):
         SELECT 
             m.msg_id, m.es_mio, m.fecha_utc, m.timestamp, m.tipo, m.contenido,
             m.archivo_local, m.mimetype, m.thumbnail,
-            m.quoted_msg_id, m.quoted_author, m.quoted_body,
+            m.quoted_msg_id, m.quoted_author, m.quoted_body, m.reenviado,
             COALESCE(ct.nombre, ct.push_name, m.remitente) AS remitente_nombre,
             m.remitente AS remitente_jid
         FROM mensajes m
@@ -1582,6 +1595,7 @@ def generate_chat_html_export(chat_id, embed_media=False):
     .incoming {{ align-self: flex-start; background: #ffffff; }}
     .outgoing {{ align-self: flex-end; background: #d9fdd3; }}
     .sender {{ font-size: 12px; font-weight: bold; color: #1f7a63; margin-bottom: 2px; }}
+    .forwarded {{ font-size: 12px; font-style: italic; color: #667781; margin-bottom: 2px; }}
     .quote {{ background: rgba(0,0,0,0.05); border-left: 3px solid #00a884; padding: 3px 7px; border-radius: 4px; font-size: 12px; color: #54656f; margin-bottom: 4px; }}
     .time {{ font-size: 10.5px; color: #667781; text-align: right; margin-top: 4px; }}
     .media-img {{ max-width: 300px; border-radius: 6px; display: block; margin-bottom: 4px; }}
@@ -1611,6 +1625,11 @@ def generate_chat_html_export(chat_id, embed_media=False):
             name = m["remitente_nombre"] or m["remitente_jid"] or "Desconocido"
             sender_html = f'<div class="sender">{html.escape(name)}</div>'
 
+        forwarded_html = ""
+        if m.get("reenviado") and m["reenviado"] > 0:
+            fwd_text = "↪↪ Reenviado muchas veces" if m["reenviado"] >= 5 else "↪ Reenviado"
+            forwarded_html = f'<div class="forwarded">{fwd_text}</div>'
+
         quote_html = ""
         if m.get("quoted_body"):
             q_body_resolved = db_manager.resolve_mentions_in_text(m["quoted_body"], contact_map)
@@ -1636,6 +1655,7 @@ def generate_chat_html_export(chat_id, embed_media=False):
         html_parts.append(f"""
         <div class="msg {cls}">
           {sender_html}
+          {forwarded_html}
           {quote_html}
           {media_html}
           {f'<div>{html.escape(content_clean)}</div>' if content_clean else ''}
@@ -1817,6 +1837,7 @@ class BackupServerHandler(BaseHTTPRequestHandler):
                 m.quoted_msg_id,
                 m.quoted_author,
                 m.quoted_body,
+                m.reenviado,
                 COALESCE(ct.nombre, ct_num.nombre, ct.push_name, ct_num.push_name, m.remitente) AS remitente_nombre,
                 m.remitente AS remitente_jid
             FROM mensajes m

@@ -79,7 +79,8 @@ def init_db(db_path=DB_FILE):
         "estado_multimedia": "TEXT DEFAULT 'none'",
         "quoted_msg_id": "TEXT",
         "quoted_author": "TEXT",
-        "quoted_body": "TEXT"
+        "quoted_body": "TEXT",
+        "reenviado": "INTEGER"
     }
 
     for col, col_type in columnas_nuevas.items():
@@ -238,6 +239,7 @@ def get_sync_status(db_path=DB_FILE, include_ids=False):
         cur.execute("""
             SELECT msg_id FROM mensajes
             WHERE msg_id IS NOT NULL
+              AND reenviado IS NOT NULL
               AND NOT (tipo = 'chat' AND (contenido IS NULL OR contenido = '') AND (quoted_body IS NULL OR quoted_body = ''))
         """)
         result["synced_msg_ids"] = [r[0] for r in cur.fetchall()]
@@ -489,6 +491,18 @@ def save_incremental_sync(data, db_path=DB_FILE):
         elif quoted_body:
             quoted_body = resolve_mentions_in_text(quoted_body, contact_map)
 
+        # Estado de mensaje reenviado (0 = normal, 1..4 = Reenviado, >=5 = Reenviado muchas veces)
+        raw_fwd_score = m.get("forwardingScore") or 0
+        try:
+            fwd_score_int = int(raw_fwd_score)
+        except Exception:
+            fwd_score_int = 0
+        is_forwarded = bool(
+            m.get("isForwarded") in (True, "true", "True", 1, "1") or
+            fwd_score_int > 0
+        )
+        reenviado = max(1, fwd_score_int) if is_forwarded else 0
+
         # Metadatos multimedia
         media_key = m.get("mediaKey")
         direct_path = m.get("directPath")
@@ -527,9 +541,9 @@ def save_incremental_sync(data, db_path=DB_FILE):
             INSERT INTO mensajes (
                 msg_id, chat_id, remitente, es_mio, fecha_utc, timestamp, 
                 tipo, contenido, mimetype, tamano, duracion, thumbnail, estado_multimedia,
-                quoted_msg_id, quoted_author, quoted_body
+                quoted_msg_id, quoted_author, quoted_body, reenviado
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(msg_id) DO UPDATE SET
                 es_mio = excluded.es_mio,
                 contenido = CASE WHEN excluded.contenido != '' THEN excluded.contenido ELSE mensajes.contenido END,
@@ -541,6 +555,7 @@ def save_incremental_sync(data, db_path=DB_FILE):
                 quoted_msg_id = COALESCE(excluded.quoted_msg_id, mensajes.quoted_msg_id),
                 quoted_author = COALESCE(excluded.quoted_author, mensajes.quoted_author),
                 quoted_body = COALESCE(NULLIF(excluded.quoted_body, ''), mensajes.quoted_body),
+                reenviado = CASE WHEN excluded.reenviado > 0 THEN excluded.reenviado ELSE COALESCE(mensajes.reenviado, excluded.reenviado) END,
                 estado_multimedia = CASE 
                     WHEN mensajes.archivo_local IS NOT NULL THEN mensajes.estado_multimedia 
                     ELSE excluded.estado_multimedia 
@@ -548,7 +563,7 @@ def save_incremental_sync(data, db_path=DB_FILE):
         """, (
             mid, chat_id, sender, is_mine, dt_str, ts, 
             m_type, body, mimetype, size, duration, thumbnail, estado_media,
-            quoted_msg_id, quoted_author, quoted_body
+            quoted_msg_id, quoted_author, quoted_body, reenviado
         ))
         stats["messages_saved"] += 1
 

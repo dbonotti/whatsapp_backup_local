@@ -359,8 +359,10 @@
           if (!id) continue;
           const body = typeof m.body === "string" ? m.body : (typeof m.text === "string" ? m.text : "");
           const caption = typeof m.caption === "string" ? m.caption : "";
-          if (body || caption) {
-            map.set(id, { body, caption });
+          const isForwarded = Boolean(m.isForwarded || (m.forwardingScore && m.forwardingScore > 0));
+          const forwardingScore = Number(m.forwardingScore) || (isForwarded ? 1 : 0);
+          if (body || caption || isForwarded) {
+            map.set(id, { body, caption, isForwarded, forwardingScore });
           }
         }
       }
@@ -603,6 +605,86 @@
     return valid[0];
   }
 
+  function extractForwardingFromBuffer(buffer) {
+    if (!buffer) return { isForwarded: false, forwardingScore: 0 };
+    const bytes = new Uint8Array(buffer);
+    if (bytes.length < 3) return { isForwarded: false, forwardingScore: 0 };
+
+    // 1. Escaneo rápido de firma exacta ContextInfo en WAProto:
+    // field 21 (forwardingScore, tag 0xa8 0x01) + field 22 (isForwarded, tag 0xb0 0x01 0x01)
+    for (let i = 0; i < bytes.length - 2; i++) {
+      if (bytes[i] === 0xa8 && bytes[i + 1] === 0x01) {
+        const scoreRes = readVarint(bytes, i + 2);
+        if (scoreRes && scoreRes.val > 0 && scoreRes.val <= 1000) {
+          const nextPos = scoreRes.pos;
+          if (nextPos + 2 < bytes.length && bytes[nextPos] === 0xb0 && bytes[nextPos + 1] === 0x01 && bytes[nextPos + 2] === 0x01) {
+            return { isForwarded: true, forwardingScore: scoreRes.val };
+          }
+        }
+      }
+    }
+
+    // 2. Búsqueda estructurada recursiva en submensajes Protobuf válidos (ContextInfo)
+    function checkSubmessage(sub, depth) {
+      if (depth > 5 || !sub || sub.length < 3) return null;
+      let pos = 0;
+      let hasIsForwarded = false;
+      let fwdScore = 0;
+      let validFields = 0;
+
+      while (pos < sub.length) {
+        const tagRes = readVarint(sub, pos);
+        if (!tagRes || tagRes.val <= 0) return null;
+        pos = tagRes.pos;
+        const wireType = tagRes.val & 7;
+        const fieldNum = Math.floor(tagRes.val / 8);
+        if (fieldNum <= 0 || fieldNum > 500) return null;
+
+        if (wireType === 0) {
+          const v = readVarint(sub, pos);
+          if (!v) return null;
+          pos = v.pos;
+          validFields++;
+          if (depth >= 1 && fieldNum === 21 && v.val > 0 && v.val <= 1000) {
+            fwdScore = v.val;
+          } else if (depth >= 1 && fieldNum === 22 && v.val === 1) {
+            hasIsForwarded = true;
+          }
+        } else if (wireType === 1) {
+          pos += 8;
+          if (pos > sub.length) return null;
+          validFields++;
+        } else if (wireType === 5) {
+          pos += 4;
+          if (pos > sub.length) return null;
+          validFields++;
+        } else if (wireType === 2) {
+          const lenRes = readVarint(sub, pos);
+          if (!lenRes || lenRes.val < 0 || lenRes.pos + lenRes.val > sub.length) return null;
+          const child = sub.subarray(lenRes.pos, lenRes.pos + lenRes.val);
+          pos = lenRes.pos + lenRes.val;
+          validFields++;
+          const nestedRes = checkSubmessage(child, depth + 1);
+          if (nestedRes && nestedRes.isForwarded) return nestedRes;
+        } else {
+          return null;
+        }
+      }
+
+      if (pos === sub.length && validFields > 0 && (hasIsForwarded || fwdScore > 0)) {
+        return { isForwarded: true, forwardingScore: Math.max(1, fwdScore) };
+      }
+      return null;
+    }
+
+    for (let offset = 0; offset <= Math.min(16, bytes.length - 3); offset++) {
+      const res = checkSubmessage(offset === 0 ? bytes : bytes.subarray(offset), 0);
+      if (res && res.isForwarded) return res;
+    }
+
+    return { isForwarded: false, forwardingScore: 0 };
+  }
+
   function bufferToBase64(buf) {
     if (!buf) return null;
     if (typeof buf === "string") return buf;
@@ -777,16 +859,38 @@
             bodyText = isBinaryOrB64(rawBody) ? "" : (rawBody || caption);
           }
 
-          // Si no hay texto en claro y existe msgRowOpaqueData, descifrar probando todas las claves activas
+          // Estado de reenviado desde propiedades directas o modelo en memoria
+          const ctxInfo = m.msgContextInfo || m.contextInfo || {};
+          let forwardingScore = Number(m.forwardingScore) || Number(ctxInfo.forwardingScore) || (memEntry && memEntry.forwardingScore) || 0;
+          let isForwarded = Boolean(
+            m.isForwarded ||
+            ctxInfo.isForwarded ||
+            (memEntry && memEntry.isForwarded) ||
+            forwardingScore > 0
+          );
+
+          // Si falta texto o no hay marca explícita de reenviado y existe msgRowOpaqueData, descifrar e inspeccionar Protobuf
           const canHaveEncryptedText = !isMedia || (m.type in { image: 1, video: 1, document: 1 });
-          if (!bodyText && canHaveEncryptedText && m.msgRowOpaqueData) {
+          if (m.msgRowOpaqueData && ((!bodyText && canHaveEncryptedText) || !isForwarded)) {
             const decBuf = await decryptOpaqueData(m.msgRowOpaqueData);
             if (decBuf) {
-              const decoded = extractTextFromBuffer(decBuf);
-              if (decoded && !isBinaryOrB64(decoded)) {
-                bodyText = decoded;
+              if (!bodyText && canHaveEncryptedText) {
+                const decoded = extractTextFromBuffer(decBuf);
+                if (decoded && !isBinaryOrB64(decoded)) {
+                  bodyText = decoded;
+                }
+              }
+              if (!isForwarded) {
+                const fwdInfo = extractForwardingFromBuffer(decBuf);
+                if (fwdInfo.isForwarded) {
+                  isForwarded = true;
+                  forwardingScore = Math.max(forwardingScore, fwdInfo.forwardingScore || 1);
+                }
               }
             }
+          }
+          if (isForwarded && forwardingScore < 1) {
+            forwardingScore = 1;
           }
 
           if (bodyText) {
@@ -833,7 +937,9 @@
             filehash: m.filehash ? bufferToBase64(m.filehash) : null,
             quotedMsgId: quotedMsgId,
             quotedAuthor: quotedAuthor,
-            quotedBody: quotedBody
+            quotedBody: quotedBody,
+            isForwarded: isForwarded,
+            forwardingScore: forwardingScore
           };
         }));
 
