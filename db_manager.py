@@ -169,6 +169,15 @@ def init_db(db_path=DB_FILE):
     END;
     """)
 
+    # 5. Limpiar placeholders 'chat' vacíos (sin texto descifrado ni multimedia) para permitir su re-sincronización limpia
+    cur.execute("""
+        DELETE FROM mensajes
+        WHERE tipo = 'chat'
+          AND (contenido IS NULL OR contenido = '')
+          AND (quoted_body IS NULL OR quoted_body = '')
+          AND archivo_local IS NULL
+    """)
+
     conn.commit()
     conn.close()
     print("Base de datos inicializada y esquema verificado con éxito.")
@@ -192,7 +201,10 @@ def get_sync_status(db_path=DB_FILE, include_ids=False):
     cur.execute("SELECT COUNT(*) FROM contactos")
     total_contacts = cur.fetchone()[0]
 
-    cur.execute("SELECT MAX(timestamp) FROM mensajes")
+    cur.execute("""
+        SELECT MAX(timestamp) FROM mensajes
+        WHERE NOT (tipo = 'chat' AND (contenido IS NULL OR contenido = '') AND (quoted_body IS NULL OR quoted_body = ''))
+    """)
     max_ts = cur.fetchone()[0] or 0
 
     cur.execute("SELECT COUNT(*) FROM multimedia WHERE estado = 'pendiente' AND intentos < 3")
@@ -408,7 +420,7 @@ def save_incremental_sync(data, db_path=DB_FILE):
 
         m_type = m.get("type", "chat")
         # Ignorar mensajes internos de sistema/plantillas vacías de WhatsApp
-        if m_type in ("e2e_notification", "notification_template", "gp2", "protocol", "ciphertext"):
+        if m_type in ("e2e_notification", "notification_template", "gp2", "protocol", "ciphertext", "biz_content_placeholder", "message_history_notice", "pinned_message"):
             continue
 
         mid_str = str(mid) if mid else ""
@@ -492,6 +504,10 @@ def save_incremental_sync(data, db_path=DB_FILE):
 
         has_media = bool(media_key and direct_path)
         estado_media = "pendiente" if has_media else "none"
+
+        # No guardar placeholders de texto vacíos aún no descifrados para no contaminar la vista previa ni bloquear su re-sincronización
+        if m_type in ("chat", "album", "unknown") and not body and not quoted_body and not has_media:
+            continue
 
         # Asegurar que el chat padre exista en la tabla chats (con nombre NULL si no se conoce aún)
         if chat_id:
@@ -657,7 +673,6 @@ def create_manual_backup(db_path=DB_FILE, backup_dir="backups"):
     file_size = os.path.getsize(backup_path)
     return {
         "filename": backup_filename,
-        "path": backup_path.replace("\\", "/"),
         "size_bytes": file_size,
         "size_mb": round(file_size / (1024 * 1024), 2),
         "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")

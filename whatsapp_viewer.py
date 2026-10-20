@@ -917,6 +917,13 @@ HTML_UI = """<!DOCTYPE html>
       if (lastTipo === 'audio') return '🎵 Audio';
       if (lastTipo === 'document') return '📄 Documento';
       if (lastTipo === 'sticker') return '💟 Sticker';
+      if (lastTipo === 'album') return '📷 Álbum de fotos';
+      if (lastTipo === 'revoked') return '🚫 Este mensaje fue eliminado';
+      if (lastTipo === 'location') return '📍 Ubicación';
+      if (lastTipo === 'vcard') return '👤 Contacto';
+      if (lastTipo === 'poll_creation') return '📊 Encuesta';
+      if (lastTipo === 'interactive' || lastTipo === 'list' || lastTipo === 'rich_response') return '💬 Mensaje interactivo';
+      if (lastTipo === 'groups_v4_invite') return '👥 Invitación de grupo';
       return 'Sin mensajes';
     }
 
@@ -1749,7 +1756,8 @@ class BackupServerHandler(BaseHTTPRequestHandler):
                 FROM mensajes
                 WHERE chat_id IS NOT NULL 
                   AND chat_id != 'status@broadcast'
-                  AND tipo NOT IN ('e2e_notification', 'notification_template', 'gp2', 'protocol', 'ciphertext', 'call_log', 'biz_content_placeholder')
+                  AND tipo NOT IN ('e2e_notification', 'notification_template', 'gp2', 'protocol', 'ciphertext', 'call_log', 'biz_content_placeholder', 'message_history_notice', 'pinned_message', 'album')
+                  AND NOT (tipo = 'chat' AND (contenido IS NULL OR contenido = ''))
             )
             SELECT 
                 lm.chat_id,
