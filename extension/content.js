@@ -429,8 +429,23 @@
     return false;
   }
 
-  function extractProtobufStrings(bytes, depth = 0) {
+  function isLikelyMediaBinaryFragment(s) {
+    if (!s) return true;
+    const t = s.trim();
+    if (!t) return true;
+    // En mensajes multimedia, descartar fragmentos cortos sin espacios que mezclan símbolos técnicos o dígitos/mayúsculas aleatorias (ej. "2:", "NX<ah+s", "%U3", "t8qJt")
+    if (!t.includes(" ") && t.length <= 12) {
+      if (/[<>\[\]{}()%^~|&*=+:;\/\\`$_]/.test(t)) return true;
+      if (/\d/.test(t) && /[A-Za-z]/.test(t)) return true;
+      if (/^[A-Za-z]{1,4}$/.test(t) && /[A-Z]/.test(t) && /[a-z]/.test(t) && !/^[A-Z][a-z]{2,3}$/.test(t)) return true;
+    }
+    return false;
+  }
+
+  function extractProtobufStrings(bytes, depth = 0, isMedia = false) {
     if (depth > 5 || !bytes || bytes.length === 0) return [];
+    // Descartar bloques binarios JPEG crudos (miniaturas jpegThumbnail: FF D8 FF)
+    if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return [];
     const candidates = [];
     let pos = 0;
 
@@ -460,20 +475,27 @@
         pos = lenRes.pos + lenRes.val;
 
         if (sub.length > 0) {
+          // Evitar inspeccionar miniaturas JPEG crudas como texto o submensajes
+          if (sub.length >= 3 && sub[0] === 0xff && sub[1] === 0xd8 && sub[2] === 0xff) {
+            continue;
+          }
           // 1. Intentar decodificar como UTF-8 estricto
-          try {
-            const str = new TextDecoder("utf-8", { fatal: true }).decode(sub);
-            if (!/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(str)) {
-              const cleaned = str.trim();
-              if (cleaned && !isGarbageString(cleaned)) {
-                const bonus = (fieldNum === 1 || fieldNum === 2 || fieldNum === 3 || fieldNum === 6) ? 1000 : 0;
-                candidates.push({ text: cleaned, score: cleaned.length + bonus });
+          const isAllowedMediaField = !isMedia || (fieldNum === 1 || fieldNum === 2 || fieldNum === 3 || fieldNum === 6 || fieldNum === 8 || fieldNum === 20);
+          if (isAllowedMediaField) {
+            try {
+              const str = new TextDecoder("utf-8", { fatal: true }).decode(sub);
+              if (!/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(str)) {
+                const cleaned = str.trim();
+                if (cleaned && !isGarbageString(cleaned) && (!isMedia || !isLikelyMediaBinaryFragment(cleaned))) {
+                  const bonus = (fieldNum === 1 || fieldNum === 2 || fieldNum === 3 || fieldNum === 6 || fieldNum === 20) ? 1000 : 0;
+                  candidates.push({ text: cleaned, score: cleaned.length + bonus });
+                }
               }
-            }
-          } catch (e) {}
+            } catch (e) {}
+          }
 
-          // 2. Explorar recursivamente por si es un mensaje contenedor (Message / ExtendedTextMessage)
-          const nested = extractProtobufStrings(sub, depth + 1);
+          // 2. Explorar recursivamente por si es un mensaje contenedor (Message / ExtendedTextMessage / ImageMessage)
+          const nested = extractProtobufStrings(sub, depth + 1, isMedia);
           for (const item of nested) {
             candidates.push(item);
           }
@@ -482,6 +504,8 @@
         break;
       }
     }
+    // Si es un submensaje anidado y no terminó exactamente al final del buffer, era un campo binario (ej. scansSidecar / mediaKey), no un submensaje Protobuf
+    if (depth > 0 && pos !== bytes.length) return [];
     return candidates;
   }
 
@@ -539,14 +563,14 @@
     return chunk;
   }
 
-  function extractTextFromBuffer(buffer) {
+  function extractTextFromBuffer(buffer, isMedia = false) {
     if (!buffer) return "";
     const bytes = new Uint8Array(buffer);
     if (bytes.length === 0) return "";
 
     // 1. Primero usar el parser estructurado de Protobuf probando offsets 0..16
     for (let offset = 0; offset <= Math.min(16, bytes.length - 2); offset++) {
-      const protoCandidates = extractProtobufStrings(offset === 0 ? bytes : bytes.subarray(offset), 0);
+      const protoCandidates = extractProtobufStrings(offset === 0 ? bytes : bytes.subarray(offset), 0, isMedia);
       if (protoCandidates.length > 0) {
         protoCandidates.sort((a, b) => b.score - a.score);
         if (protoCandidates[0].score >= 1000 || offset === 0) {
@@ -554,6 +578,9 @@
         }
       }
     }
+
+    // En mensajes multimedia (imagen/video/documento), no ejecutar escaneo de bytes sueltos para no capturar fragmentos ASCII de miniaturas JPEG binarias o hashes
+    if (isMedia) return "";
 
     // 2. Escáner directo de campos length-prefixed (0x0a, 0x12, 0x1a, 0x32) en cualquier posición de cabecera
     const scannedCandidates = scanLengthPrefixedStrings(bytes);
@@ -791,12 +818,19 @@
       const rawContacts = await getAllFromStore(db, "contact");
       const rawChats = await getAllFromStore(db, "chat");
 
-      const cleanContacts = rawContacts.map(c => ({
-        id: extractId(c.id),
-        name: c.name || c.formattedName || null,
-        pushname: c.pushname || null,
-        number: c.number || null
-      }));
+      const cleanContacts = rawContacts.map(c => {
+        const cid = extractId(c.id);
+        const rawPhone = extractId(c.phoneNumber || c.pn || c.phoneNumberJid || c.number);
+        const phoneDigits = rawPhone ? String(rawPhone).split("@")[0].replace(/\D/g, "") : null;
+        const cidPrefix = cid ? String(cid).split("@")[0] : "";
+        const validPhone = (phoneDigits && (!String(cid || "").endsWith("@lid") || phoneDigits !== cidPrefix)) ? phoneDigits : null;
+        return {
+          id: cid,
+          name: c.name || c.formattedName || c.verifiedName || null,
+          pushname: c.pushname || null,
+          number: validPhone
+        };
+      });
 
       const cleanChats = rawChats.map(ch => ({
         id: extractId(ch.id),
@@ -833,6 +867,11 @@
         const chunk = rawMessages.slice(i, i + DECRYPT_CHUNK_SIZE);
         const processedChunk = await Promise.all(chunk.map(async (m) => {
           const msgId = extractId(m.id);
+          // Ignorar contenedores virtuales de álbumes (agrupadores sin mensaje propio)
+          if (m.type === "album") {
+            if (msgId && knownMessageKeys !== null) knownMessageKeys.add(msgId);
+            return null;
+          }
           const isMedia = m.type in { image: 1, video: 1, sticker: 1, ptt: 1, audio: 1, document: 1 };
           const memEntry = msgId ? inMemoryMap.get(msgId) : null;
 
@@ -875,7 +914,7 @@
             const decBuf = await decryptOpaqueData(m.msgRowOpaqueData);
             if (decBuf) {
               if (!bodyText && canHaveEncryptedText) {
-                const decoded = extractTextFromBuffer(decBuf);
+                const decoded = extractTextFromBuffer(decBuf, isMedia);
                 if (decoded && !isBinaryOrB64(decoded)) {
                   bodyText = decoded;
                 }

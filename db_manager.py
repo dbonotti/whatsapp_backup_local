@@ -179,9 +179,149 @@ def init_db(db_path=DB_FILE):
           AND archivo_local IS NULL
     """)
 
+    # 6. Vincular números de teléfono reales en contactos @lid
+    resolve_lid_phone_numbers(cur)
+
     conn.commit()
     conn.close()
     print("Base de datos inicializada y esquema verificado con éxito.")
+
+def resolve_lid_phone_numbers(cur):
+    """Limpia números ficticios (LID) en contactos @lid y vincula su número real desde contactos @s.whatsapp.net / @c.us."""
+    cur.execute("""
+        UPDATE contactos
+        SET numero = SUBSTR(contact_id, 1, INSTR(contact_id, '@') - 1)
+        WHERE (contact_id LIKE '%@s.whatsapp.net' OR contact_id LIKE '%@c.us')
+          AND contact_id != '0@c.us'
+          AND (numero IS NULL OR numero = '')
+    """)
+    cur.execute("""
+        UPDATE contactos
+        SET numero = NULL
+        WHERE contact_id LIKE '%@lid'
+          AND numero = REPLACE(contact_id, '@lid', '')
+    """)
+    cur.execute("""
+        UPDATE contactos
+        SET numero = COALESCE(
+            (
+                SELECT s.numero FROM contactos s
+                WHERE (s.contact_id LIKE '%@s.whatsapp.net' OR s.contact_id LIKE '%@c.us')
+                  AND s.numero IS NOT NULL AND s.numero != ''
+                  AND contactos.nombre IS NOT NULL AND contactos.nombre != ''
+                  AND s.nombre = contactos.nombre
+                  AND s.push_name = contactos.push_name
+                LIMIT 1
+            ),
+            (
+                SELECT s.numero FROM contactos s
+                WHERE (s.contact_id LIKE '%@s.whatsapp.net' OR s.contact_id LIKE '%@c.us')
+                  AND s.numero IS NOT NULL AND s.numero != ''
+                  AND contactos.nombre IS NOT NULL AND contactos.nombre != ''
+                  AND s.nombre = contactos.nombre
+                LIMIT 1
+            ),
+            (
+                SELECT s.numero FROM contactos s
+                WHERE (s.contact_id LIKE '%@s.whatsapp.net' OR s.contact_id LIKE '%@c.us')
+                  AND s.numero IS NOT NULL AND s.numero != ''
+                  AND (contactos.nombre IS NULL OR contactos.nombre = '')
+                  AND contactos.push_name IS NOT NULL AND contactos.push_name != ''
+                  AND (s.push_name = contactos.push_name OR s.nombre = contactos.push_name)
+                LIMIT 1
+            )
+        )
+        WHERE contact_id LIKE '%@lid' AND (numero IS NULL OR numero = '')
+    """)
+
+def format_phone_number(raw):
+    """Formatea un número telefónico en formato internacional legible (+54 9 291 ...)."""
+    if not raw:
+        return ""
+    digits = re.sub(r"\D", "", str(raw).split("@")[0])
+    if not digits:
+        return ""
+    if re.match(r"^549\d{10}$", digits):
+        return f"+54 9 {digits[3:6]} {digits[6:9]}-{digits[9:]}"
+    if re.match(r"^54\d{10}$", digits):
+        return f"+54 {digits[2:5]} {digits[5:8]}-{digits[8:]}"
+    if re.match(r"^1\d{10}$", digits):
+        return f"+1 {digits[1:4]} {digits[4:7]}-{digits[7:]}"
+    if len(digits) > 4:
+        return f"+{digits[:2]} {digits[2:]}"
+    return f"+{digits}"
+
+def get_contacts_for_export(db_path=DB_FILE):
+    """Obtiene la lista consolidada y sin duplicados de contactos con nombre y número de teléfono."""
+    conn = get_connection(db_path)
+    cur = conn.cursor()
+    resolve_lid_phone_numbers(cur)
+    conn.commit()
+
+    cur.execute("""
+        SELECT contact_id, nombre, push_name, numero
+        FROM contactos
+        WHERE contact_id IS NOT NULL
+          AND contact_id != '0@c.us'
+          AND contact_id NOT LIKE '%@g.us'
+          AND contact_id NOT LIKE '%@broadcast'
+          AND contact_id NOT LIKE '%@newsletter'
+    """)
+    rows = cur.fetchall()
+    conn.close()
+
+    by_phone = {}
+    for r in rows:
+        cid = (r["contact_id"] or "").strip()
+        num = (r["numero"] or "").strip()
+        if cid.endswith("@s.whatsapp.net") or cid.endswith("@c.us"):
+            phone = cid.split("@")[0].strip()
+        elif cid.endswith("@lid"):
+            lid_part = cid.split("@")[0].strip()
+            phone = num if (num and num != lid_part) else ""
+        else:
+            phone = num
+
+        phone_digits = re.sub(r"\D", "", phone)
+        if not phone_digits or len(phone_digits) < 7:
+            continue
+
+        nombre = (r["nombre"] or "").strip()
+        push_name = (r["push_name"] or "").strip()
+
+        if phone_digits not in by_phone:
+            by_phone[phone_digits] = {
+                "nombre": nombre,
+                "push_name": push_name,
+                "phone": phone_digits
+            }
+        else:
+            entry = by_phone[phone_digits]
+            if nombre and (not entry["nombre"] or entry["nombre"].startswith("+")):
+                entry["nombre"] = nombre
+            if push_name and not entry["push_name"]:
+                entry["push_name"] = push_name
+
+    result = []
+    for phone_digits, info in by_phone.items():
+        nombre = info["nombre"]
+        push_name = info["push_name"]
+        # Si el nombre agendado es solo el número con '+' pero existe push_name real, priorizar push_name
+        if nombre and nombre.startswith("+") and push_name and not push_name.startswith("+"):
+            display_name = push_name
+        else:
+            display_name = nombre or push_name or "Sin agendar"
+
+        has_real_name = bool((nombre and not nombre.startswith("+")) or (push_name and not push_name.startswith("+")))
+        result.append({
+            "nombre": display_name,
+            "telefono": format_phone_number(phone_digits),
+            "numero": phone_digits,
+            "_has_name": has_real_name
+        })
+
+    result.sort(key=lambda x: (0 if x["_has_name"] else 1, x["nombre"].lower(), x["numero"]))
+    return result
 
 def extract_id(val):
     if isinstance(val, dict):
@@ -383,14 +523,28 @@ def save_incremental_sync(data, db_path=DB_FILE):
             continue
         nombre = c.get("name") or c.get("formattedName")
         push_name = c.get("pushname")
-        numero = c.get("number") or (cid.split("@")[0] if "@" in cid else None)
+        raw_num = extract_id(c.get("number") or c.get("phoneNumber"))
+        if raw_num and "@" in raw_num:
+            raw_num = raw_num.split("@")[0]
+        if not raw_num and (cid.endswith("@s.whatsapp.net") or cid.endswith("@c.us")):
+            raw_num = cid.split("@")[0]
+        if cid.endswith("@lid") and raw_num == cid.split("@")[0]:
+            raw_num = None
+        numero = raw_num
         foto = c.get("avatar") or c.get("profilePicThumbObj", {}).get("eurl") if isinstance(c.get("profilePicThumbObj"), dict) else None
 
         cur.execute("""
-            INSERT OR REPLACE INTO contactos (contact_id, nombre, push_name, numero, foto)
+            INSERT INTO contactos (contact_id, nombre, push_name, numero, foto)
             VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(contact_id) DO UPDATE SET
+                nombre = COALESCE(excluded.nombre, contactos.nombre),
+                push_name = COALESCE(excluded.push_name, contactos.push_name),
+                numero = COALESCE(excluded.numero, contactos.numero),
+                foto = COALESCE(excluded.foto, contactos.foto)
         """, (cid, nombre, push_name, numero, foto))
         stats["contacts_saved"] += 1
+
+    resolve_lid_phone_numbers(cur)
 
     # 2. Chats
     chats = data.get("chats", [])
@@ -422,7 +576,7 @@ def save_incremental_sync(data, db_path=DB_FILE):
 
         m_type = m.get("type", "chat")
         # Ignorar mensajes internos de sistema/plantillas vacías de WhatsApp
-        if m_type in ("e2e_notification", "notification_template", "gp2", "protocol", "ciphertext", "biz_content_placeholder", "message_history_notice", "pinned_message"):
+        if m_type in ("e2e_notification", "notification_template", "gp2", "protocol", "ciphertext", "biz_content_placeholder", "message_history_notice", "pinned_message", "album"):
             continue
 
         mid_str = str(mid) if mid else ""

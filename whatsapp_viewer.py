@@ -2,6 +2,8 @@ import sqlite3
 import json
 import os
 import re
+import csv
+import io
 import base64
 import mimetypes
 import webbrowser
@@ -272,7 +274,27 @@ HTML_UI = """<!DOCTYPE html>
     }
     .header-left { display: flex; align-items: center; }
     #header-info h3 { font-size: 16px; color: var(--text-primary); font-weight: 600; }
-    #header-info p { font-size: 12px; color: var(--text-muted); margin-top: 1px; }
+    #header-info p, .header-sub { font-size: 12px; color: var(--text-muted); margin-top: 2px; display: flex; align-items: center; gap: 8px; }
+    .header-phone-row { display: inline-flex; align-items: center; gap: 7px; }
+    .header-phone-text { color: var(--text-secondary); font-weight: 500; font-size: 12.5px; letter-spacing: 0.1px; user-select: text; }
+    .btn-copy-phone {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      border: 1px solid var(--border-strong);
+      background: var(--bg-sidebar);
+      color: var(--text-secondary);
+      border-radius: 10px;
+      padding: 1px 7px;
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.15s;
+      user-select: none;
+    }
+    .btn-copy-phone:hover { background: var(--bg-hover); border-color: var(--accent); color: var(--accent); }
+    .btn-copy-phone.copied { background: rgba(0, 168, 132, 0.14); border-color: var(--accent); color: var(--accent); }
+    .btn-copy-phone svg { width: 11px; height: 11px; fill: currentColor; flex-shrink: 0; }
 
     .header-actions { display: flex; align-items: center; gap: 8px; }
     .btn-chat-action {
@@ -610,6 +632,10 @@ HTML_UI = """<!DOCTYPE html>
                 <span>💾</span>
                 <span>Copias de seguridad (Backup)</span>
               </button>
+              <button class="dropdown-item" onclick="closeAllDropdowns(); exportContactsCsv();">
+                <span>📇</span>
+                <span>Exportar contactos (.csv)</span>
+              </button>
               <div class="dropdown-divider"></div>
               <button class="dropdown-item" onclick="toggleTheme(); closeAllDropdowns();">
                 <span id="themeMenuIcon">🌙</span>
@@ -896,6 +922,25 @@ HTML_UI = """<!DOCTYPE html>
       return fallbackStr && fallbackStr.includes(' ') ? fallbackStr.split(' ')[1].substring(0, 5) : '';
     }
 
+    function formatPhoneNumber(rawPhone) {
+      if (!rawPhone) return '';
+      const raw = String(rawPhone).split('@')[0].replace(/\\D/g, '');
+      if (!raw) return '';
+      if (/^549\\d{10}$/.test(raw)) {
+        return `+54 9 ${raw.substring(3, 6)} ${raw.substring(6, 9)}-${raw.substring(9)}`;
+      }
+      if (/^54\\d{10}$/.test(raw)) {
+        return `+54 ${raw.substring(2, 5)} ${raw.substring(5, 8)}-${raw.substring(8)}`;
+      }
+      if (/^1\\d{10}$/.test(raw)) {
+        return `+1 ${raw.substring(1, 4)} ${raw.substring(4, 7)}-${raw.substring(7)}`;
+      }
+      if (/^\\d{7,15}$/.test(raw)) {
+        return `+${raw}`;
+      }
+      return raw;
+    }
+
     function formatFriendlyName(name, jid) {
       if (name && !name.endsWith('@c.us') && !name.endsWith('@g.us') && !name.endsWith('@lid') && !name.endsWith('@broadcast')) {
         return name;
@@ -1095,7 +1140,9 @@ HTML_UI = """<!DOCTYPE html>
           const name = (c.display_name || '').toLowerCase();
           const id = (c.chat_id || '').toLowerCase();
           const last = (c.last_msg || '').toLowerCase();
-          return name.includes(q) || id.includes(q) || last.includes(q);
+          const phone = (c.phone_number || '').toLowerCase();
+          const phoneFmt = formatPhoneNumber(c.phone_number).toLowerCase();
+          return name.includes(q) || id.includes(q) || last.includes(q) || phone.includes(q) || phoneFmt.includes(q);
         });
         renderChats(filtered);
       } else {
@@ -1161,9 +1208,31 @@ HTML_UI = """<!DOCTYPE html>
       document.getElementById('headerTitle').textContent = friendlyTitle;
       
       const isGroup = chat.chat_id.endsWith('@g.us');
-      document.getElementById('headerSub').textContent = isGroup 
-        ? 'Grupo de WhatsApp' 
-        : (chat.chat_id.endsWith('@c.us') ? formatFriendlyName(null, chat.chat_id) : 'Conversación directa');
+      const isNewsletter = chat.chat_id.endsWith('@newsletter');
+      const knownChat = allChats.find(c => c.chat_id === chat.chat_id) || chat;
+      const rawPhone = (!isGroup && !isNewsletter)
+        ? (knownChat.phone_number || ((chat.chat_id.endsWith('@c.us') || chat.chat_id.endsWith('@s.whatsapp.net')) ? chat.chat_id.split('@')[0] : null))
+        : null;
+
+      const headerSubEl = document.getElementById('headerSub');
+      if (isGroup) {
+        headerSubEl.textContent = 'Grupo de WhatsApp';
+      } else if (isNewsletter) {
+        headerSubEl.textContent = 'Canal de WhatsApp';
+      } else if (rawPhone) {
+        const formattedPhone = formatPhoneNumber(rawPhone);
+        headerSubEl.innerHTML = `
+          <span class="header-phone-row">
+            <span class="header-phone-text">${escapeHtml(formattedPhone)}</span>
+            <button type="button" class="btn-copy-phone" onclick="copyChatPhone('${escapeHtml(formattedPhone)}', this)" title="Copiar número de teléfono">
+              <svg viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg>
+              <span class="copy-label">Copiar</span>
+            </button>
+          </span>
+        `;
+      } else {
+        headerSubEl.textContent = 'Conversación directa';
+      }
       
       const avatarEl = document.getElementById('headerAvatar');
       avatarEl.textContent = (friendlyTitle || '?')[0].toUpperCase();
@@ -1418,11 +1487,46 @@ HTML_UI = """<!DOCTYPE html>
       }
     }
 
-    // Exportación de Chat a HTML
+    // Exportación de Chat a HTML y Contactos a CSV
     function exportCurrentChat(embedMedia = false) {
       if (!selectedChatId) return;
       const embedParam = embedMedia ? '&embed=1' : '';
       window.open(`/api/export/html?chat_id=${encodeURIComponent(selectedChatId)}${embedParam}`, '_blank');
+    }
+
+    function exportContactsCsv() {
+      showToast('Descargando contactos en formato CSV...');
+      window.location.href = '/api/export/contacts';
+    }
+
+    async function copyChatPhone(phoneText, btnEl) {
+      if (!phoneText) return;
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          await navigator.clipboard.writeText(phoneText);
+        } else {
+          const ta = document.createElement('textarea');
+          ta.value = phoneText;
+          ta.style.position = 'fixed';
+          ta.style.opacity = '0';
+          document.body.appendChild(ta);
+          ta.select();
+          document.execCommand('copy');
+          document.body.removeChild(ta);
+        }
+        if (btnEl) {
+          const labelEl = btnEl.querySelector('.copy-label');
+          btnEl.classList.add('copied');
+          if (labelEl) labelEl.textContent = '✓ Copiado';
+          setTimeout(() => {
+            btnEl.classList.remove('copied');
+            if (labelEl) labelEl.textContent = 'Copiar';
+          }, 2000);
+        }
+        showToast(`📋 Número copiado: ${phoneText}`);
+      } catch (e) {
+        showToast('Error al copiar el número al portapapeles');
+      }
     }
 
     // Gestión de Multimedia
@@ -1790,13 +1894,18 @@ class BackupServerHandler(BaseHTTPRequestHandler):
                     c.nombre,
                     lm.chat_id
                 ) AS display_name,
+                COALESCE(
+                    CASE WHEN lm.chat_id LIKE '%@c.us' OR lm.chat_id LIKE '%@s.whatsapp.net' THEN SUBSTR(lm.chat_id, 1, INSTR(lm.chat_id, '@') - 1) END,
+                    ct.numero,
+                    ct_num.numero
+                ) AS phone_number,
                 lm.last_msg,
                 lm.last_tipo,
                 COALESCE(c.ultimo_timestamp, lm.last_ts) AS last_ts
             FROM latest_msgs lm
             LEFT JOIN chats c ON lm.chat_id = c.chat_id
             LEFT JOIN contactos ct ON lm.chat_id = ct.contact_id
-            LEFT JOIN contactos ct_num ON REPLACE(lm.chat_id, '@c.us', '@s.whatsapp.net') = ct_num.contact_id
+            LEFT JOIN contactos ct_num ON lm.chat_id LIKE '%@c.us' AND REPLACE(lm.chat_id, '@c.us', '@s.whatsapp.net') = ct_num.contact_id
             WHERE lm.rn = 1
             ORDER BY COALESCE(c.ultimo_timestamp, lm.last_ts) DESC
             """
@@ -1881,6 +1990,23 @@ class BackupServerHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(html_bytes)))
             self.end_headers()
             self.wfile.write(html_bytes)
+            return
+
+        elif url.path == "/api/export/contacts":
+            contacts = db_manager.get_contacts_for_export()
+            output = io.StringIO()
+            writer = csv.writer(output, lineterminator="\r\n")
+            writer.writerow(["Nombre", "Número de teléfono"])
+            for c in contacts:
+                writer.writerow([c["nombre"], c["telefono"]])
+            csv_bytes = ("\ufeff" + output.getvalue()).encode("utf-8")
+            ts_str = datetime.now().strftime("%Y-%m-%d")
+            self.send_response(200)
+            self.send_header("Content-type", "text/csv; charset=utf-8")
+            self.send_header("Content-Disposition", f'attachment; filename="contactos_whatsapp_{ts_str}.csv"')
+            self.send_header("Content-Length", str(len(csv_bytes)))
+            self.end_headers()
+            self.wfile.write(csv_bytes)
             return
 
         elif url.path == "/api/backup/list":
