@@ -23,7 +23,8 @@ HTML_UI = """<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>WhatsApp Backup - Visor Local Avanzado</title>
+  <title>Backup WhatsApp</title>
+  <link rel="icon" type="image/jpeg" href="/favicon.jpg">
   <style>
     :root {
       --bg-body: #111b21;
@@ -102,7 +103,7 @@ HTML_UI = """<!DOCTYPE html>
       border-bottom: 1px solid var(--border-color); 
     }
     .brand-title { display: flex; align-items: center; gap: 8px; }
-    .brand-title svg { fill: #25d366; flex-shrink: 0; }
+    .brand-logo { width: 26px; height: 26px; border-radius: 6px; object-fit: cover; flex-shrink: 0; }
     
     .sidebar-actions { display: flex; align-items: center; gap: 8px; }
     .menu-container { position: relative; display: flex; align-items: center; }
@@ -611,8 +612,8 @@ HTML_UI = """<!DOCTYPE html>
     <div id="sidebar">
       <div class="sidebar-header">
         <div class="brand-title">
-          <svg width="22" height="22" viewBox="0 0 24 24"><path d="M12.04 2c-5.46 0-9.91 4.45-9.91 9.91 0 1.75.46 3.45 1.32 4.95L2.05 22l5.25-1.38c1.45.79 3.08 1.21 4.74 1.21 5.46 0 9.91-4.45 9.91-9.91 0-5.46-4.45-9.92-9.91-9.92z"/></svg>
-          <span>WhatsApp Backup</span>
+          <img class="brand-logo" src="/favicon.jpg" alt="" width="26" height="26">
+          <span>Backup WhatsApp</span>
         </div>
         <div class="sidebar-actions">
           <div class="sync-badge" id="syncStatusBadge" onclick="openMediaModal()" title="Ver estado de sincronización y multimedia">
@@ -1848,6 +1849,22 @@ class BackupServerHandler(BaseHTTPRequestHandler):
             self.send_header("Content-type", "text/html; charset=utf-8")
             self.end_headers()
             self.wfile.write(HTML_UI.encode("utf-8"))
+            return
+
+        elif url.path in ["/favicon.jpg", "/favicon.ico"]:
+            favicon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "favicon.jpg")
+            if os.path.isfile(favicon_path):
+                with open(favicon_path, "rb") as f:
+                    icon_bytes = f.read()
+                self.send_response(200)
+                self.send_header("Content-Type", "image/jpeg")
+                self.send_header("Content-Length", str(len(icon_bytes)))
+                self.send_header("Cache-Control", "public, max-age=86400")
+                self.end_headers()
+                self.wfile.write(icon_bytes)
+            else:
+                self.send_response(404)
+                self.end_headers()
             return
 
         elif url.path == "/api/sync/status":
