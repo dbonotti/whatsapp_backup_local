@@ -28,6 +28,18 @@
   let isVerifyingKeys = false;
   let knownMessageKeys = null;
   let lastIdbMessageCount = -1;
+  let lastContactsHash = null;
+  let lastChatsHash = null;
+  let lastContactsSyncTime = 0;
+
+  function fastHash(str) {
+    let h = 0x811c9dc5;
+    for (let i = 0; i < str.length; i++) {
+      h ^= str.charCodeAt(i);
+      h = Math.imul(h, 0x01000193);
+    }
+    return (h >>> 0).toString(36);
+  }
 
   console.log("%c[BackupWA Userscript] Iniciando interceptor pasivo de respaldo local...", "color: #00a884; font-weight: bold; font-size: 13px;");
 
@@ -715,7 +727,11 @@
 
   function backendFetch(endpoint, options = {}) {
     return new Promise((resolve, reject) => {
-      const url = endpoint.startsWith("http") ? endpoint : (BACKEND_URL + endpoint);
+      // Solo rutas relativas del API local (nunca URLs absolutas arbitrarias)
+      if (typeof endpoint !== "string" || !endpoint.startsWith("/api/")) {
+        return reject(new Error("Endpoint no permitido"));
+      }
+      const url = BACKEND_URL + endpoint;
 
       if (typeof GM_xmlhttpRequest !== "undefined") {
         GM_xmlhttpRequest({
@@ -723,6 +739,7 @@
           url: url,
           headers: options.headers || {},
           data: options.body || null,
+          timeout: 45000,
           onload: (res) => {
             if (res.status >= 200 && res.status < 300) {
               try {
@@ -811,6 +828,18 @@
         t: ch.t || ch.timestamp || null
       }));
 
+      // Determinar si contactos o chats han cambiado respecto al último envío
+      const contactsHash = fastHash(JSON.stringify(cleanContacts));
+      const chatsHash = fastHash(JSON.stringify(cleanChats));
+      const now = Date.now();
+      const contactsExpired = (now - lastContactsSyncTime) > 1800000; // Revalidar contactos cada 30 min
+
+      const shouldSendContacts = forceAll || contactsExpired || (contactsHash !== lastContactsHash);
+      const shouldSendChats = forceAll || (chatsHash !== lastChatsHash);
+
+      const contactsToSend = shouldSendContacts ? cleanContacts : [];
+      const chatsToSend = shouldSendChats ? cleanChats : [];
+
       const minTimestamp = forceAll ? 0 : Math.max(0, lastTimestamp - 3600);
       const rawMessages = await getMessagesSince(db, minTimestamp, forceAll);
       db.close();
@@ -818,13 +847,22 @@
       console.log(`[BackupWA] Mensajes candidatos a procesar: ${rawMessages.length}`);
 
       if (rawMessages.length === 0) {
+        if (!shouldSendContacts && !shouldSendChats) {
+          const nowStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+          updateWidgetStatus("synced", `Al día (${nowStr})`);
+          return;
+        }
+
         await backendFetch("/api/sync", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ contacts: cleanContacts, chats: cleanChats, messages: [] })
+          body: JSON.stringify({ contacts: contactsToSend, chats: chatsToSend, messages: [] })
         });
+        lastContactsHash = contactsHash;
+        lastChatsHash = chatsHash;
+        lastContactsSyncTime = now;
         const nowStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-        console.log("%c[BackupWA] Al día. No hay mensajes nuevos.", "color: #10b981; font-weight: bold;");
+        console.log("%c[BackupWA] Contactos y chats sincronizados.", "color: #10b981; font-weight: bold;");
         updateWidgetStatus("synced", `Al día (${nowStr})`);
         return;
       }
@@ -955,9 +993,6 @@
           if (isTextType && !hasValidContent) {
             continue;
           }
-          if (knownMessageKeys !== null) {
-            knownMessageKeys.add(item.id);
-          }
           cleanMessages.push(item);
         }
 
@@ -967,11 +1002,20 @@
       }
 
       if (cleanMessages.length === 0) {
+        if (!shouldSendContacts && !shouldSendChats) {
+          const nowStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+          updateWidgetStatus("synced", `Al día (${nowStr})`);
+          return;
+        }
+
         await backendFetch("/api/sync", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ contacts: cleanContacts, chats: cleanChats, messages: [] })
+          body: JSON.stringify({ contacts: contactsToSend, chats: chatsToSend, messages: [] })
         });
+        lastContactsHash = contactsHash;
+        lastChatsHash = chatsHash;
+        lastContactsSyncTime = now;
         const nowStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
         updateWidgetStatus("synced", `Al día (${nowStr})`);
         return;
@@ -983,8 +1027,8 @@
       for (let i = 0; i < cleanMessages.length; i += BATCH_SIZE) {
         const batch = cleanMessages.slice(i, i + BATCH_SIZE);
         const payload = {
-          contacts: i === 0 ? cleanContacts : [],
-          chats: i === 0 ? cleanChats : [],
+          contacts: i === 0 ? contactsToSend : [],
+          chats: i === 0 ? chatsToSend : [],
           messages: batch
         };
 
@@ -993,6 +1037,12 @@
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload)
         });
+
+        if (knownMessageKeys !== null) {
+          for (const m of batch) {
+            if (m && m.id) knownMessageKeys.add(m.id);
+          }
+        }
 
         if (resJson && resJson.stats) {
           totalSaved += resJson.stats.messages_saved || 0;
@@ -1005,6 +1055,10 @@
           updateWidgetStatus("syncing", `Guardando ${Math.min(i + BATCH_SIZE, cleanMessages.length)}/${cleanMessages.length}...`);
         }
       }
+
+      lastContactsHash = contactsHash;
+      lastChatsHash = chatsHash;
+      lastContactsSyncTime = now;
 
       const nowStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
       console.log(`%c[BackupWA] Sincronización exitosa: ${totalSaved} mensajes guardados, ${totalMediaEnqueued} multimedia en cola.`, "color: #10b981; font-weight: bold; font-size: 13px;");

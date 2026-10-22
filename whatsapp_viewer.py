@@ -1,6 +1,11 @@
 import sqlite3
 import json
 import os
+import sys
+import shutil
+import threading
+import subprocess
+import time
 import re
 import csv
 import io
@@ -17,6 +22,17 @@ import db_manager
 import media_manager
 
 PORT = 8080
+
+LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+SYNC_LOG_PATH = os.path.join(LOG_DIR, "sync.log")
+
+def append_sync_log(entry_text):
+    try:
+        os.makedirs(LOG_DIR, exist_ok=True)
+        with open(SYNC_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(entry_text + "\n")
+    except Exception:
+        pass
 
 HTML_UI = """<!DOCTYPE html>
 <html lang="es">
@@ -637,6 +653,10 @@ HTML_UI = """<!DOCTYPE html>
                 <span>📇</span>
                 <span>Exportar contactos (.csv)</span>
               </button>
+              <button class="dropdown-item" onclick="closeAllDropdowns(); openSyncLogs();">
+                <span>📋</span>
+                <span>Logs de sincronización</span>
+              </button>
               <div class="dropdown-divider"></div>
               <button class="dropdown-item" onclick="toggleTheme(); closeAllDropdowns();">
                 <span id="themeMenuIcon">🌙</span>
@@ -887,8 +907,8 @@ HTML_UI = """<!DOCTYPE html>
       if (!text) return false;
       const t = text.trim();
       if (t.startsWith('data:image') || t.includes('/9j/')) return true;
-      if (/^[0-9a-zA-Z._+-]+@(s\.whatsapp\.net|lid|g\.us|c\.us|broadcast|newsletter)$/i.test(t)) return true;
-      if (/@(s\.whatsapp\.net|lid|g\.us|c\.us|broadcast)\b/i.test(t) && !t.includes(' ')) return true;
+      if (/^[0-9a-zA-Z._+-]+@(s\\.whatsapp\\.net|lid|g\\.us|c\\.us|broadcast|newsletter)$/i.test(t)) return true;
+      if (/@(s\\.whatsapp\\.net|lid|g\\.us|c\\.us|broadcast)\\b/i.test(t) && !t.includes(' ')) return true;
       if (t.length > 35 && !/\\s/.test(t) && /^[-A-Za-z0-9+/=_*&\"'()%:;$^]+$/.test(t)) return true;
       return false;
     }
@@ -1178,7 +1198,7 @@ HTML_UI = """<!DOCTYPE html>
           li.innerHTML = `
             <div class="search-chat-title">${escapeHtml(title)}</div>
             <div class="search-snippet">${item.snippet || escapeHtml(cleanText(item.contenido || ''))}</div>
-            <div class="search-date">${item.fecha_utc || ''}</div>
+            <div class="search-date">${escapeHtml(item.fecha_utc || '')}</div>
           `;
           list.appendChild(li);
         });
@@ -1500,6 +1520,14 @@ HTML_UI = """<!DOCTYPE html>
       window.location.href = '/api/export/contacts';
     }
 
+    function openSyncLogs() {
+      fetch('/api/logs/open', { method: 'POST' }).then(() => {
+        showToast('Ventana de logs abierta.');
+      }).catch(() => {
+        window.open('/logs', '_blank');
+      });
+    }
+
     async function copyChatPhone(phoneText, btnEl) {
       if (!phoneText) return;
       try {
@@ -1776,13 +1804,119 @@ def generate_chat_html_export(chat_id, embed_media=False):
 """)
     return "".join(html_parts)
 
+_sync_lock = threading.Lock()
+_sync_batch_count = 0
+_total_messages_synced = 0
+
+def open_logs_window():
+    """Abre la ventana dedicada de logs en una consola independiente."""
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    bat_path = os.path.join(base_dir, "ver_logs.bat")
+    try:
+        if os.name == "nt" and os.path.isfile(bat_path):
+            subprocess.Popen(["cmd.exe", "/c", bat_path], creationflags=subprocess.CREATE_NEW_CONSOLE)
+        elif os.name == "nt":
+            ps_cmd = (
+                "$Host.UI.RawUI.WindowTitle = 'Logs de Sincronizacion - WhatsApp Backup'; "
+                f"Get-Content -Path '{SYNC_LOG_PATH}' -Wait -Tail 50"
+            )
+            subprocess.Popen(
+                ["powershell.exe", "-NoExit", "-ExecutionPolicy", "Bypass", "-Command", ps_cmd],
+                creationflags=subprocess.CREATE_NEW_CONSOLE
+            )
+    except Exception:
+        pass
+
+def start_keyboard_listener(url):
+    """Escucha teclas de atajo [V] y [L] en segundo plano."""
+    if os.name != "nt":
+        return
+    try:
+        import msvcrt
+
+        def _listen():
+            while True:
+                try:
+                    if msvcrt.kbhit():
+                        ch = msvcrt.getch()
+                        if ch in (b"l", b"L"):
+                            open_logs_window()
+                        elif ch in (b"v", b"V"):
+                            webbrowser.open(url)
+                    time.sleep(0.15)
+                except Exception:
+                    time.sleep(0.5)
+
+        t = threading.Thread(target=_listen, daemon=True)
+        t.start()
+    except Exception:
+        pass
+
+def log_sync_status(stats):
+    global _sync_batch_count, _total_messages_synced
+    with _sync_lock:
+        _sync_batch_count += 1
+        msgs = stats.get("messages_saved", 0)
+        _total_messages_synced += msgs
+        contacts = stats.get("contacts_saved", 0)
+        chats = stats.get("chats_saved", 0)
+        now_time = datetime.now().strftime("%H:%M:%S")
+        now_full = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        # 1. Guardar log detallado en sync.log para la ventana de logs
+        append_sync_log(
+            f"[{now_full}] [Sync] Lote #{_sync_batch_count}: +{msgs} msgs, {chats} chats, {contacts} contactos | Detalle: {stats}"
+        )
+
+        # 2. Actualizar línea única en el panel de control
+        status_text = (
+            f"  Estado: [{now_time}] Lote #{_sync_batch_count} (+{msgs}) | "
+            f"Msgs: {_total_messages_synced} | Chats: {chats} | Contactos: {contacts}"
+        )
+        try:
+            cols = shutil.get_terminal_size(fallback=(80, 24)).columns
+            max_len = max(40, cols - 1)
+        except Exception:
+            max_len = 79
+
+        if len(status_text) > max_len:
+            status_text = status_text[:max_len]
+
+        sys.stdout.write(f"\r{status_text.ljust(max_len)}")
+        sys.stdout.flush()
+
 class BackupServerHandler(BaseHTTPRequestHandler):
+    def is_trusted_origin(self):
+        origin = self.headers.get("Origin")
+        if not origin:
+            return True
+        allowed_origins = [
+            f"http://127.0.0.1:{PORT}",
+            f"http://localhost:{PORT}",
+            "https://web.whatsapp.com"
+        ]
+        if origin in allowed_origins or origin.startswith("chrome-extension://") or origin.startswith("moz-extension://"):
+            return True
+        return False
+
     def send_cors_headers(self):
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With, Range")
+        origin = self.headers.get("Origin")
+        allowed_origins = [
+            f"http://127.0.0.1:{PORT}",
+            f"http://localhost:{PORT}",
+            "https://web.whatsapp.com"
+        ]
+        if origin and (origin in allowed_origins or origin.startswith("chrome-extension://") or origin.startswith("moz-extension://")):
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With, Range")
+            self.send_header("Vary", "Origin")
 
     def do_OPTIONS(self):
+        if not self.is_trusted_origin():
+            self.send_response(403)
+            self.end_headers()
+            return
         self.send_response(200)
         self.send_cors_headers()
         self.end_headers()
@@ -1842,6 +1976,10 @@ class BackupServerHandler(BaseHTTPRequestHandler):
                 remaining -= len(chunk)
 
     def do_GET(self):
+        if not self.is_trusted_origin():
+            self.send_json(403, {"error": "Origen no permitido"})
+            return
+
         url = urlparse(self.path)
 
         if url.path in ["/", "/index.html"]:
@@ -2059,14 +2197,35 @@ class BackupServerHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 return
 
+        elif url.path == "/logs":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.end_headers()
+            if os.path.isfile(SYNC_LOG_PATH):
+                with open(SYNC_LOG_PATH, "r", encoding="utf-8", errors="replace") as f:
+                    content = f.read()
+                self.wfile.write(content.encode("utf-8"))
+            else:
+                self.wfile.write("Aún no hay registros en logs/sync.log".encode("utf-8"))
+            return
+
         self.send_response(404)
         self.end_headers()
 
     def do_POST(self):
         try:
+            if not self.is_trusted_origin():
+                self.send_json(403, {"error": "Origen no permitido"})
+                return
+
             url = urlparse(self.path)
 
-            if url.path == "/api/sync":
+            if url.path == "/api/logs/open":
+                open_logs_window()
+                self.send_json(200, {"success": True, "message": "Ventana de logs abierta"})
+                return
+
+            elif url.path == "/api/sync":
                 content_length = int(self.headers.get("Content-Length", 0))
                 if content_length == 0:
                     self.send_json(400, {"error": "Cuerpo de solicitud vacío"})
@@ -2080,7 +2239,7 @@ class BackupServerHandler(BaseHTTPRequestHandler):
                     return
 
                 stats = db_manager.save_incremental_sync(payload)
-                print(f"[Sync] Lote procesado con éxito: {stats}")
+                log_sync_status(stats)
                 media_manager.trigger_media_processing()
 
                 self.send_json(200, {"success": True, "stats": stats})
@@ -2118,19 +2277,34 @@ def run():
 
     server = ThreadingHTTPServer(("127.0.0.1", PORT), BackupServerHandler)
     url = f"http://127.0.0.1:{PORT}"
-    print(f"============================================================")
-    print(f"  Servidor WhatsApp Backup & Visor iniciado con éxito")
-    print(f"  Dirección local: {url}")
-    print(f"  API Incremental: {url}/api/sync")
-    print(f"  Búsqueda FTS5:  {url}/api/search?q=...")
-    print(f"  Presiona Ctrl + C en esta terminal para detener el servidor")
-    print(f"============================================================")
 
+    # Limpiar consola para que el Panel de Control quede anclado arriba
+    os.system("cls" if os.name == "nt" else "clear")
+
+    append_sync_log(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [Servidor] Servidor iniciado en {url}")
+
+    print("========================================================================")
+    print("             WHATSAPP BACKUP & VISOR - PANEL DE CONTROL                 ")
+    print("========================================================================")
+    print(f"  Dirección local:       {url}")
+    print(f"  API Incremental:       {url}/api/sync")
+    print(f"  Búsqueda FTS5:         {url}/api/search?q=...")
+    print("")
+    print("  Atajos en esta consola:")
+    print("    [V]        Abrir el visor en el navegador")
+    print("    [L]        Abrir ventana de logs de sincronización en vivo")
+    print("    [Ctrl + C] Detener el servidor")
+    print("")
+    print(f"  Archivo de logs:       logs\\sync.log (o ejecuta ver_logs.bat)")
+    print("========================================================================")
+    print("  Estado: Esperando datos de sincronización...\r", end="", flush=True)
+
+    start_keyboard_listener(url)
     webbrowser.open(url)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\nServidor cerrado correctamente.")
+        print("\n\nServidor detenido correctamente.")
         server.server_close()
 
 if __name__ == "__main__":

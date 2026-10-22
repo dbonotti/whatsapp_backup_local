@@ -1,6 +1,7 @@
 import sqlite3
 import os
 import re
+import html
 from datetime import datetime, timezone
 
 DB_FILE = "whatsapp_backup.db"
@@ -141,6 +142,7 @@ def init_db(db_path=DB_FILE):
         """)
 
     # Triggers para mantener actualizado el índice FTS5 automáticamente
+    cur.execute("DROP TRIGGER IF EXISTS trg_mensajes_au")
     cur.executescript("""
     CREATE TRIGGER IF NOT EXISTS trg_mensajes_ai AFTER INSERT ON mensajes 
     WHEN new.contenido IS NOT NULL AND length(new.contenido) > 0
@@ -158,7 +160,9 @@ def init_db(db_path=DB_FILE):
         DELETE FROM mensajes_fts WHERE msg_id = old.msg_id;
     END;
 
-    CREATE TRIGGER IF NOT EXISTS trg_mensajes_au AFTER UPDATE ON mensajes BEGIN
+    CREATE TRIGGER IF NOT EXISTS trg_mensajes_au AFTER UPDATE OF contenido, remitente ON mensajes 
+    WHEN (old.contenido IS NOT new.contenido OR old.remitente IS NOT new.remitente)
+    BEGIN
         DELETE FROM mensajes_fts WHERE msg_id = old.msg_id;
         INSERT INTO mensajes_fts(msg_id, chat_id, contenido, remitente_nombre)
         VALUES (
@@ -531,7 +535,9 @@ def save_incremental_sync(data, db_path=DB_FILE):
         if cid.endswith("@lid") and raw_num == cid.split("@")[0]:
             raw_num = None
         numero = raw_num
-        foto = c.get("avatar") or c.get("profilePicThumbObj", {}).get("eurl") if isinstance(c.get("profilePicThumbObj"), dict) else None
+        thumb_obj = c.get("profilePicThumbObj")
+        eurl = thumb_obj.get("eurl") if isinstance(thumb_obj, dict) else None
+        foto = c.get("avatar") or eurl
 
         cur.execute("""
             INSERT INTO contactos (contact_id, nombre, push_name, numero, foto)
@@ -544,7 +550,8 @@ def save_incremental_sync(data, db_path=DB_FILE):
         """, (cid, nombre, push_name, numero, foto))
         stats["contacts_saved"] += 1
 
-    resolve_lid_phone_numbers(cur)
+    if contacts:
+        resolve_lid_phone_numbers(cur)
 
     # 2. Chats
     chats = data.get("chats", [])
@@ -788,7 +795,7 @@ def search_full_text(query_str, chat_id=None, limit=50, db_path=DB_FILE):
             m.tipo,
             m.contenido,
             m.archivo_local,
-            snippet(mensajes_fts, 2, '<mark>', '</mark>', '...', 25) AS snippet
+            snippet(mensajes_fts, 2, char(1), char(2), '...', 25) AS snippet
         FROM mensajes_fts fts
         JOIN mensajes m ON fts.msg_id = m.msg_id
         LEFT JOIN chats c ON m.chat_id = c.chat_id
@@ -811,7 +818,7 @@ def search_full_text(query_str, chat_id=None, limit=50, db_path=DB_FILE):
             m.tipo,
             m.contenido,
             m.archivo_local,
-            snippet(mensajes_fts, 2, '<mark>', '</mark>', '...', 25) AS snippet
+            snippet(mensajes_fts, 2, char(1), char(2), '...', 25) AS snippet
         FROM mensajes_fts fts
         JOIN mensajes m ON fts.msg_id = m.msg_id
         LEFT JOIN chats c ON m.chat_id = c.chat_id
@@ -824,6 +831,12 @@ def search_full_text(query_str, chat_id=None, limit=50, db_path=DB_FILE):
 
     results = [dict(row) for row in cur.fetchall()]
     conn.close()
+
+    # Escapar el texto del mensaje ANTES de insertar los resaltados para evitar XSS:
+    # FTS5 devuelve el contenido crudo; los delimitadores char(1)/char(2) se convierten en <mark> tras escapar.
+    for r in results:
+        snip = r.get("snippet") or ""
+        r["snippet"] = html.escape(snip).replace("\x01", "<mark>").replace("\x02", "</mark>")
     return results
 
 def create_manual_backup(db_path=DB_FILE, backup_dir="backups"):

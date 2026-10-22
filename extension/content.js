@@ -13,6 +13,18 @@
   let isVerifyingKeys = false;
   let knownMessageKeys = null; // Set en memoria de IDs de mensajes ya sincronizados con éxito
   let lastIdbMessageCount = -1;
+  let lastContactsHash = null;
+  let lastChatsHash = null;
+  let lastContactsSyncTime = 0;
+
+  function fastHash(str) {
+    let h = 0x811c9dc5;
+    for (let i = 0; i < str.length; i++) {
+      h ^= str.charCodeAt(i);
+      h = Math.imul(h, 0x01000193);
+    }
+    return (h >>> 0).toString(36);
+  }
 
   console.log("%c[BackupWA Extension] Iniciando interceptor pasivo de respaldo local...", "color: #00a884; font-weight: bold; font-size: 13px;");
 
@@ -738,10 +750,12 @@
       const reqId = "req_" + Math.random().toString(36).substring(2, 11) + "_" + Date.now();
 
       function messageHandler(event) {
-        if (event.source !== window || !event.data || event.data.type !== "BACKUPWA_RESP") return;
+        if (event.source !== window || event.origin !== window.location.origin) return;
+        if (!event.data || event.data.type !== "BACKUPWA_RESP") return;
         if (event.data.reqId !== reqId) return;
 
         window.removeEventListener("message", messageHandler);
+        clearTimeout(timeoutId);
 
         if (event.data.error) {
           return reject(new Error(event.data.error));
@@ -762,9 +776,9 @@
         reqId: reqId,
         endpoint: endpoint,
         options: options
-      }, "*");
+      }, window.location.origin);
 
-      setTimeout(() => {
+      const timeoutId = setTimeout(() => {
         window.removeEventListener("message", messageHandler);
         reject(new Error("Tiempo de espera agotado al conectar con el servidor local"));
       }, 45000);
@@ -839,6 +853,18 @@
         t: ch.t || ch.timestamp || null
       }));
 
+      // Determinar si contactos o chats han cambiado respecto al último envío
+      const contactsHash = fastHash(JSON.stringify(cleanContacts));
+      const chatsHash = fastHash(JSON.stringify(cleanChats));
+      const now = Date.now();
+      const contactsExpired = (now - lastContactsSyncTime) > 1800000; // Revalidar contactos cada 30 min
+
+      const shouldSendContacts = forceAll || contactsExpired || (contactsHash !== lastContactsHash);
+      const shouldSendChats = forceAll || (chatsHash !== lastChatsHash);
+
+      const contactsToSend = shouldSendContacts ? cleanContacts : [];
+      const chatsToSend = shouldSendChats ? cleanChats : [];
+
       // Extraer mensajes de forma segura y optimizada
       const minTimestamp = forceAll ? 0 : Math.max(0, lastTimestamp - 3600);
       const rawMessages = await getMessagesSince(db, minTimestamp, forceAll);
@@ -847,13 +873,22 @@
       console.log(`[BackupWA] Mensajes candidatos a procesar: ${rawMessages.length}`);
 
       if (rawMessages.length === 0) {
+        if (!shouldSendContacts && !shouldSendChats) {
+          const nowStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+          updateWidgetStatus("synced", `Al día (${nowStr})`);
+          return;
+        }
+
         await backendFetch("/api/sync", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ contacts: cleanContacts, chats: cleanChats, messages: [] })
+          body: JSON.stringify({ contacts: contactsToSend, chats: chatsToSend, messages: [] })
         });
+        lastContactsHash = contactsHash;
+        lastChatsHash = chatsHash;
+        lastContactsSyncTime = now;
         const nowStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-        console.log("%c[BackupWA] Al día. No hay mensajes nuevos.", "color: #10b981; font-weight: bold;");
+        console.log("%c[BackupWA] Contactos y chats sincronizados.", "color: #10b981; font-weight: bold;");
         updateWidgetStatus("synced", `Al día (${nowStr})`);
         return;
       }
@@ -990,9 +1025,6 @@
           if ( isTextType && !hasValidContent ) {
             continue;
           }
-          if (knownMessageKeys !== null) {
-            knownMessageKeys.add(item.id);
-          }
           cleanMessages.push(item);
         }
 
@@ -1002,11 +1034,20 @@
       }
 
       if (cleanMessages.length === 0) {
+        if (!shouldSendContacts && !shouldSendChats) {
+          const nowStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+          updateWidgetStatus("synced", `Al día (${nowStr})`);
+          return;
+        }
+
         await backendFetch("/api/sync", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ contacts: cleanContacts, chats: cleanChats, messages: [] })
+          body: JSON.stringify({ contacts: contactsToSend, chats: chatsToSend, messages: [] })
         });
+        lastContactsHash = contactsHash;
+        lastChatsHash = chatsHash;
+        lastContactsSyncTime = now;
         const nowStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
         updateWidgetStatus("synced", `Al día (${nowStr})`);
         return;
@@ -1019,8 +1060,8 @@
       for (let i = 0; i < cleanMessages.length; i += BATCH_SIZE) {
         const batch = cleanMessages.slice(i, i + BATCH_SIZE);
         const payload = {
-          contacts: i === 0 ? cleanContacts : [],
-          chats: i === 0 ? cleanChats : [],
+          contacts: i === 0 ? contactsToSend : [],
+          chats: i === 0 ? chatsToSend : [],
           messages: batch
         };
 
@@ -1029,6 +1070,12 @@
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload)
         });
+
+        if (knownMessageKeys !== null) {
+          for (const m of batch) {
+            if (m && m.id) knownMessageKeys.add(m.id);
+          }
+        }
 
         if (resJson && resJson.stats) {
           totalSaved += resJson.stats.messages_saved || 0;
@@ -1041,6 +1088,10 @@
           updateWidgetStatus("syncing", `Guardando ${Math.min(i + BATCH_SIZE, cleanMessages.length)}/${cleanMessages.length}...`);
         }
       }
+
+      lastContactsHash = contactsHash;
+      lastChatsHash = chatsHash;
+      lastContactsSyncTime = now;
 
       const nowStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
       console.log(`%c[BackupWA] Sincronización exitosa: ${totalSaved} mensajes guardados, ${totalMediaEnqueued} multimedia en cola.`, "color: #10b981; font-weight: bold; font-size: 13px;");

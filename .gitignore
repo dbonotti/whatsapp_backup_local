@@ -17,6 +17,7 @@ media/
 backups/
 
 # Registros y temporales
+logs/
 *.log
 *.tmp
 .DS_Store

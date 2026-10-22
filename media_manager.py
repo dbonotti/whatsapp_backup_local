@@ -6,6 +6,7 @@ import urllib.error
 import mimetypes
 import threading
 import sqlite3
+from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 try:
     from cryptography.hazmat.primitives import hashes
@@ -232,6 +233,17 @@ def _update_status(msg_id, estado, error_msg=None, db_path=DB_FILE):
     except Exception:
         pass
 
+def log_media_msg(msg):
+    log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+    log_path = os.path.join(log_dir, "sync.log")
+    try:
+        os.makedirs(log_dir, exist_ok=True)
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(f"[{now_str}] {msg}\n")
+    except Exception:
+        pass
+
 class MediaDownloadWorker:
     """Administrador de descargas en segundo plano."""
     def __init__(self, db_path=DB_FILE, max_workers=3):
@@ -251,11 +263,12 @@ class MediaDownloadWorker:
 
     def _run_batch(self, limit):
         if not HAS_CRYPTO:
-            print("[MediaWorker] Aviso: Instala 'cryptography' (pip install -r requirements.txt) para descifrar multimedia.")
+            log_media_msg("[MediaWorker] Aviso: Instala 'cryptography' (pip install -r requirements.txt) para descifrar multimedia.")
             with self._lock:
                 self.is_running = False
             return
         try:
+            processed_ids = set()
             while True:
                 conn = get_connection(self.db_path)
                 cur = conn.cursor()
@@ -269,12 +282,17 @@ class MediaDownloadWorker:
                 rows = [dict(r) for r in cur.fetchall()]
                 conn.close()
 
-                if not rows:
+                # Evitar bucle infinito si hay registros problemáticos que no transicionan de estado
+                new_rows = [r for r in rows if r["msg_id"] not in processed_ids]
+                if not new_rows:
                     break
 
-                print(f"[MediaWorker] Procesando lote de {len(rows)} archivos multimedia...")
+                for r in new_rows:
+                    processed_ids.add(r["msg_id"])
+
+                log_media_msg(f"[MediaWorker] Procesando lote de {len(new_rows)} archivos multimedia...")
                 futures = []
-                for r in rows:
+                for r in new_rows:
                     f = self.executor.submit(
                         download_and_decrypt,
                         r["msg_id"],
@@ -291,7 +309,7 @@ class MediaDownloadWorker:
                     try:
                         f.result()
                     except Exception as e:
-                        print(f"[MediaWorker] Error en hilo de descarga: {e}")
+                        log_media_msg(f"[MediaWorker] Error en hilo de descarga: {e}")
 
         finally:
             with self._lock:
