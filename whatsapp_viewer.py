@@ -1971,6 +1971,77 @@ _sync_lock = threading.Lock()
 _sync_batch_count = 0
 _total_messages_synced = 0
 
+def get_disk_extension_version():
+    """Lee la versión de la extensión declarada en extension/manifest.json."""
+    try:
+        manifest_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "extension", "manifest.json")
+        if os.path.isfile(manifest_file):
+            with open(manifest_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return data.get("version", "1.0.0")
+    except Exception:
+        pass
+    return "1.0.0"
+
+def check_and_apply_update(url):
+    """Verifica si hay actualizaciones en GitHub y permite aplicarlas interactivamente sin pérdida de datos."""
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    if not os.path.isdir(os.path.join(base_dir, ".git")):
+        print("\n\n[Actualizador] Esta carpeta no fue clonada con Git. No se puede actualizar automáticamente.\r", end="", flush=True)
+        return
+
+    print("\n\n" + "=" * 65)
+    print("        BUSCADOR DE ACTUALIZACIONES EN GITHUB")
+    print("=" * 65)
+    print("Consultando servidor de GitHub...")
+    try:
+        res = subprocess.run(["git", "fetch", "origin", "main", "--quiet"], cwd=base_dir, capture_output=True, timeout=12)
+        if res.returncode != 0:
+            print("[Error] No se pudo conectar con GitHub. Verifica tu conexión a internet.")
+            print("=" * 65 + "\n")
+            return
+
+        count_res = subprocess.run(["git", "rev-list", "HEAD..origin/main", "--count"], cwd=base_dir, capture_output=True, text=True)
+        count = int(count_res.stdout.strip() or "0")
+        if count == 0:
+            print("[✓] ¡Tu sistema ya está actualizado a la última versión disponible!")
+            print("=" * 65 + "\n")
+            return
+
+        print(f"[!] Se encontraron {count} actualización(es) disponible(s).")
+        print("\nÚltimos cambios:")
+        log_res = subprocess.run(["git", "log", "HEAD..origin/main", "--oneline", "-5"], cwd=base_dir, capture_output=True, text=True)
+        print(log_res.stdout.strip())
+        print("=" * 65)
+        print("Seguridad garantizada: se creará un snapshot previo de whatsapp_backup.db.")
+        resp = input("¿Deseas aplicar la actualización ahora? (S/N) [S]: ").strip().upper()
+        if resp in ("", "S", "SI"):
+            db_path = os.path.join(base_dir, "whatsapp_backup.db")
+            if os.path.isfile(db_path):
+                backups_dir = os.path.join(base_dir, "backups")
+                os.makedirs(backups_dir, exist_ok=True)
+                bak_name = f"db_backup_pre_update_{int(time.time())}.db"
+                shutil.copy2(db_path, os.path.join(backups_dir, bak_name))
+                print(f"[1/3] Copia preventiva de seguridad creada en: backups/{bak_name}")
+            else:
+                print("[1/3] Sin base de datos previa que respaldar.")
+
+            print("[2/3] Descargando código actualizado...")
+            pull_res = subprocess.run(["git", "pull", "origin", "main"], cwd=base_dir, capture_output=True, text=True)
+            if pull_res.returncode == 0:
+                print("      Código actualizado correctamente.")
+                print("[3/3] Verificando dependencias de Python...")
+                subprocess.run([sys.executable, "-m", "pip", "install", "-r", "requirements.txt", "--quiet"], cwd=base_dir)
+                print("\n" + "=" * 65)
+                print("¡Actualización completada!")
+                print("Reinicia el servidor (Ctrl+C y vuelve a abrir iniciar_visor.bat)")
+                print("para que los cambios en Python surtan efecto.")
+                print("=" * 65 + "\n")
+            else:
+                print(f"      [Error] Falló la descarga: {pull_res.stderr}")
+    except Exception as e:
+        print(f"[Error en actualizador]: {e}")
+
 def open_logs_window():
     """Abre la ventana dedicada de logs en una consola independiente."""
     base_dir = os.path.dirname(os.path.abspath(__file__))
@@ -2006,6 +2077,8 @@ def start_keyboard_listener(url):
                             open_logs_window()
                         elif ch in (b"v", b"V"):
                             webbrowser.open(url)
+                        elif ch in (b"u", b"U"):
+                            check_and_apply_update(url)
                     time.sleep(0.15)
                 except Exception:
                     time.sleep(0.5)
@@ -2172,6 +2245,7 @@ class BackupServerHandler(BaseHTTPRequestHandler):
             params = parse_qs(url.query)
             include_ids = params.get("include_ids", ["0"])[0] == "1"
             status = db_manager.get_sync_status(include_ids=include_ids)
+            status["extension_version"] = get_disk_extension_version()
             self.send_json(200, status)
             return
 
@@ -2364,7 +2438,8 @@ class BackupServerHandler(BaseHTTPRequestHandler):
             ext_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "extension"))
             self.send_json(200, {
                 "extension_path": ext_path,
-                "browser_extension_url": "chrome://extensions"
+                "browser_extension_url": "chrome://extensions",
+                "extension_version": get_disk_extension_version()
             })
             return
 
@@ -2464,6 +2539,7 @@ def run():
     print("  Atajos en esta consola:")
     print("    [V]        Abrir el visor en el navegador")
     print("    [L]        Abrir ventana de logs de sincronización en vivo")
+    print("    [U]        Buscar y aplicar actualizaciones de GitHub")
     print("    [Ctrl + C] Detener el servidor")
     print("")
     print(f"  Archivo de logs:       logs\\sync.log (o ejecuta ver_logs.bat)")

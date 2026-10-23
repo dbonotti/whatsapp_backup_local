@@ -14,6 +14,20 @@ function isAllowedRequest(endpoint, method) {
 }
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  // Manejador de recarga asistida de la extensión en caliente
+  if (request.action === "reload_extension") {
+    const senderUrl = (sender && (sender.url || (sender.tab && sender.tab.url))) || "";
+    if (!senderUrl.startsWith("https://web.whatsapp.com/")) {
+      sendResponse({ ok: false, error: "Origen no permitido" });
+      return;
+    }
+    sendResponse({ ok: true });
+    setTimeout(() => {
+      chrome.runtime.reload();
+    }, 150);
+    return;
+  }
+
   if (request.action !== "backend_fetch") return;
 
   // Solo aceptar mensajes provenientes de pestañas de WhatsApp Web

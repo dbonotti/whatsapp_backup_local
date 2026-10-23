@@ -811,6 +811,9 @@
         if (knownMessageKeys === null && Array.isArray(statusData.synced_msg_ids)) {
           knownMessageKeys = new Set(statusData.synced_msg_ids);
         }
+        if (statusData && statusData.extension_version && statusData.installed_extension_version) {
+          checkExtensionUpdate(statusData.extension_version, statusData.installed_extension_version);
+        }
       } catch (backendErr) {
         console.warn("[BackupWA] Servidor local no disponible:", backendErr);
         updateWidgetStatus("error", "Servidor local desconectado");
@@ -1290,11 +1293,26 @@
     widget.innerHTML = `
       <div id="backupwa-dot" style="width: 8px; height: 8px; border-radius: 50%; background: #eab308; flex-shrink: 0;"></div>
       <span id="backupwa-text" style="font-weight: 500;">Iniciando respaldo...</span>
+      <button id="backupwa-btn-update" title="Nueva versión disponible. Haz clic para recargar la extensión y WhatsApp Web en 1 clic." style="display: none; border: none; background: #2563eb; color: #fff; border-radius: 12px; padding: 3px 9px; font-size: 11px; font-weight: 600; cursor: pointer;">🔄 Actualizar Extensión</button>
       <button id="backupwa-btn-sync" title="Sincronizar mensajes nuevos o recientes" style="border: none; background: #00a884; color: #fff; border-radius: 12px; padding: 3px 9px; font-size: 11px; font-weight: 600; cursor: pointer;">Novedades</button>
       <button id="backupwa-btn-all" title="Sincronizar todos los mensajes para vincular archivos multimedia (fotos, audios, docs)" style="border: 1px solid #00a884; background: #ffffff; color: #00a884; border-radius: 12px; padding: 2px 8px; font-size: 11px; font-weight: 600; cursor: pointer;">Todo (Media)</button>
     `;
 
     document.body.appendChild(widget);
+
+    const btnUpdate = document.getElementById("backupwa-btn-update");
+    if (btnUpdate) {
+      btnUpdate.onclick = (e) => {
+        e.stopPropagation();
+        btnUpdate.disabled = true;
+        btnUpdate.textContent = "Recargando...";
+        updateWidgetStatus("syncing", "Actualizando extensión...");
+        window.postMessage({ type: "BACKUPWA_RELOAD_EXT" }, "https://web.whatsapp.com");
+        setTimeout(() => {
+          window.location.reload();
+        }, 1200);
+      };
+    }
 
     document.getElementById("backupwa-btn-sync").onclick = (e) => {
       e.stopPropagation();
@@ -1307,6 +1325,18 @@
       knownMessageKeys = null;
       triggerSync(false, true);
     };
+  }
+
+  function checkExtensionUpdate(diskVer, installedVer) {
+    const btnUpdate = document.getElementById("backupwa-btn-update");
+    if (!btnUpdate) return;
+    if (diskVer && installedVer && diskVer !== installedVer) {
+      btnUpdate.style.display = "inline-block";
+      btnUpdate.textContent = `🔄 Actualizar v${diskVer}`;
+      btnUpdate.title = `Versión activa: v${installedVer} | Versión en disco: v${diskVer}. Haz clic para recargar la extensión y WhatsApp Web en 1 clic.`;
+    } else {
+      btnUpdate.style.display = "none";
+    }
   }
 
   function updateWidgetStatus(state, message) {

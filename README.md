@@ -19,11 +19,20 @@ whatsapp_backup_local/
 ├── whatsapp_viewer.py               # Servidor local HTTP, panel de control y visor web
 ├── db_manager.py                    # Gestor de base de datos SQLite (WAL mode, FTS5)
 ├── media_manager.py                 # Descifrador de multimedia (HKDF-SHA256 + AES-256-CBC)
-├── iniciar_visor.bat                # Lanzador con autoinstalación de dependencias y panel
+├── iniciar_visor.bat                # Lanzador con actualizador automático y panel de control
 ├── ver_logs.bat                     # Visor en vivo de logs de sincronización
 ├── iniciar_visor_segundo_plano.vbs  # Lanzador silencioso en segundo plano
 ├── requirements.txt                 # Dependencias mínimas del sistema (cryptography)
 └── README.md                        # Esta guía de uso
+```
+
+---
+
+## 🔄 Actualizaciones Seguras en 1 Clic
+
+El sistema incluye un sistema de actualización inteligente diseñado para **garantizar la total preservación de tus datos**:
+* **En el Visor (`iniciar_visor.bat`):** Al iniciar, verifica si hay nuevas versiones en GitHub. Si aceptas actualizar, realiza un respaldo preventivo de `whatsapp_backup.db` en la carpeta `backups/` antes de descargar el código. También puedes presionar `[U]` en cualquier momento en el panel de control.
+* **En la Extensión (WhatsApp Web):** Si el servidor detecta una versión más reciente en disco, el widget flotante mostrará el botón `🔄 Actualizar a v...`. Al hacer clic, recarga la extensión y la pestaña automáticamente sin necesidad de entrar a la configuración del navegador.
 ```
 
 ---
