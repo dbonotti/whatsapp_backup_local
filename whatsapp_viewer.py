@@ -603,6 +603,81 @@ HTML_UI = """<!DOCTYPE html>
     #empty-state h2 { color: var(--text-primary); margin-bottom: 8px; font-weight: 400; font-size: 26px; }
     #empty-state p { font-size: 14px; max-width: 480px; line-height: 20px; }
 
+    /* Tarjeta de Primer Inicio / Onboarding */
+    .onboarding-box {
+      background: var(--bg-sidebar);
+      border: 1px solid var(--border-strong);
+      border-radius: 14px;
+      padding: 26px 28px;
+      max-width: 560px;
+      width: 92%;
+      text-align: left;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.08);
+    }
+    .onboarding-badge {
+      display: inline-block;
+      background: rgba(0, 168, 132, 0.15);
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 700;
+      padding: 4px 10px;
+      border-radius: 12px;
+      margin-bottom: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .onboarding-box h3 { font-size: 20px; color: var(--text-primary); margin-bottom: 8px; }
+    .onboarding-box p.onboarding-desc { font-size: 13.5px; color: var(--text-secondary); line-height: 19px; margin-bottom: 18px; }
+    .onboarding-steps { display: flex; flex-direction: column; gap: 12px; }
+    .onboarding-step {
+      display: flex;
+      gap: 12px;
+      align-items: flex-start;
+      background: var(--bg-input);
+      padding: 12px 14px;
+      border-radius: 10px;
+      border: 1px solid var(--border-color);
+    }
+    .step-num {
+      width: 26px;
+      height: 26px;
+      background: var(--accent);
+      color: #fff;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 13px;
+      font-weight: 700;
+      flex-shrink: 0;
+    }
+    .step-content { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--text-primary); line-height: 18px; width: 100%; }
+    .step-content strong { color: var(--text-primary); font-size: 13.5px; }
+    .step-content span { color: var(--text-secondary); }
+    .path-copy-row { display: flex; gap: 8px; margin-top: 6px; align-items: center; }
+    .path-copy-input {
+      flex: 1;
+      padding: 6px 10px;
+      font-size: 12px;
+      border: 1px solid var(--border-strong);
+      border-radius: 6px;
+      background: var(--bg-sidebar);
+      color: var(--text-primary);
+      font-family: monospace;
+    }
+    .btn-copy-path {
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      padding: 6px 12px;
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .btn-copy-path:hover { opacity: 0.9; }
+
     /* Notificación Toast */
     #toast {
       position: fixed;
@@ -1085,11 +1160,99 @@ HTML_UI = """<!DOCTYPE html>
       } else {
         renderChats(allChats);
       }
+      updateEmptyState();
+    }
+
+    function updateEmptyState() {
+      const emptyStateEl = document.getElementById('empty-state');
+      if (!emptyStateEl || selectedChatId) return;
+
+      if (!allChats || allChats.length === 0) {
+        emptyStateEl.innerHTML = `
+          <div class="onboarding-box">
+            <span class="onboarding-badge">🚀 Guía de Primer Inicio</span>
+            <h3>Servidor Activo y Listo</h3>
+            <p class="onboarding-desc">Para comenzar a respaldar tus conversaciones de forma segura y privada, completa estos sencillos pasos:</p>
+            
+            <div class="onboarding-steps">
+              <div class="onboarding-step">
+                <div class="step-num">1</div>
+                <div class="step-content">
+                  <strong>Servidor local en funcionamiento</strong>
+                  <span>El motor SQLite está activo y escuchando en <code>http://127.0.0.1:8080</code>.</span>
+                </div>
+              </div>
+
+              <div class="onboarding-step">
+                <div class="step-num">2</div>
+                <div class="step-content">
+                  <strong>Carga la extensión en tu navegador (Chrome / Edge / Brave)</strong>
+                  <span>Abre <code>chrome://extensions</code>, activa el <em>Modo de desarrollador</em> y haz clic en <em>Cargar descomprimida</em> seleccionando esta carpeta:</span>
+                  <div class="path-copy-row">
+                    <input type="text" id="extPathInput" class="path-copy-input" readonly value="Cargando ruta..." />
+                    <button type="button" class="btn-copy-path" onclick="copyExtensionPath()">📋 Copiar ruta</button>
+                  </div>
+                </div>
+              </div>
+
+              <div class="onboarding-step">
+                <div class="step-num">3</div>
+                <div class="step-content">
+                  <strong>Abre WhatsApp Web</strong>
+                  <span>Ingresa a <a href="https://web.whatsapp.com" target="_blank" style="color: var(--accent); font-weight:600; text-decoration: underline;">web.whatsapp.com</a>. Tus mensajes comenzarán a respaldarse de forma pasiva e incremental.</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        `;
+        fetchExtensionPath();
+      } else {
+        emptyStateEl.innerHTML = `
+          <h2>WhatsApp Business Backup</h2>
+          <p>Selecciona una conversación a la izquierda o utiliza el buscador indexado de texto completo.</p>
+          <p id="dbStatsText" style="margin-top: 14px; font-size: 13px; color: var(--text-time);"></p>
+        `;
+      }
+    }
+
+    let cachedExtensionPath = '';
+    async function fetchExtensionPath() {
+      try {
+        if (!cachedExtensionPath) {
+          const res = await fetch('/api/extension/info');
+          const data = await res.json();
+          cachedExtensionPath = data.extension_path || '';
+        }
+        const input = document.getElementById('extPathInput');
+        if (input) input.value = cachedExtensionPath;
+      } catch (e) {}
+    }
+
+    async function copyExtensionPath() {
+      if (!cachedExtensionPath) {
+        await fetchExtensionPath();
+      }
+      if (cachedExtensionPath) {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          await navigator.clipboard.writeText(cachedExtensionPath);
+        } else {
+          const input = document.getElementById('extPathInput');
+          if (input) {
+            input.select();
+            document.execCommand('copy');
+          }
+        }
+        showToast('Ruta de la extensión copiada al portapapeles.');
+      }
     }
 
     function renderChats(chats) {
       const list = document.getElementById('chat-list');
       list.innerHTML = '';
+      if (!chats || chats.length === 0) {
+        list.innerHTML = '<li style="padding: 24px 14px; color: var(--text-time); text-align: center; font-size: 13px; line-height: 1.5;">Sin conversaciones respaldadas aún.<br>Sigue la guía en pantalla.</li>';
+        return;
+      }
       chats.forEach(chat => {
         const li = document.createElement('li');
         li.className = 'chat-item' + (chat.chat_id === selectedChatId ? ' active' : '');
@@ -2196,6 +2359,14 @@ class BackupServerHandler(BaseHTTPRequestHandler):
                 self.send_response(404)
                 self.end_headers()
                 return
+
+        elif url.path == "/api/extension/info":
+            ext_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "extension"))
+            self.send_json(200, {
+                "extension_path": ext_path,
+                "browser_extension_url": "chrome://extensions"
+            })
+            return
 
         elif url.path == "/logs":
             self.send_response(200)

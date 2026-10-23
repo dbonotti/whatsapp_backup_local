@@ -16,15 +16,13 @@ whatsapp_backup_local/
 │   ├── background.js                # Service worker puente hacia el servidor local
 │   ├── bridge.js                    # Conector seguro entre contextos de página
 │   └── content.js                   # Extractor pasivo incremental y widget visual
-├── whatsapp_viewer.py               # Servidor local HTTP (con Range 206), API y visor web
+├── whatsapp_viewer.py               # Servidor local HTTP, panel de control y visor web
 ├── db_manager.py                    # Gestor de base de datos SQLite (WAL mode, FTS5)
 ├── media_manager.py                 # Descifrador de multimedia (HKDF-SHA256 + AES-256-CBC)
-├── clean_database.py                # Utilidad de optimización y mantenimiento
-├── whatsapp_backup_sync.user.js     # Versión alternativa en userscript (Tampermonkey)
-├── iniciar_visor.bat                # Lanzador del servidor con consola en Windows
-├── iniciar_visor_segundo_plano.vbs  # Lanzador silencioso en segundo plano (sin ventana)
-├── instalar_dependencias.bat        # Instalador automático de librerías de Python
-├── requirements.txt                 # Dependencias mínimas del sistema
+├── iniciar_visor.bat                # Lanzador con autoinstalación de dependencias y panel
+├── ver_logs.bat                     # Visor en vivo de logs de sincronización
+├── iniciar_visor_segundo_plano.vbs  # Lanzador silencioso en segundo plano
+├── requirements.txt                 # Dependencias mínimas del sistema (cryptography)
 └── README.md                        # Esta guía de uso
 ```
 
@@ -37,11 +35,12 @@ whatsapp_backup_local/
 
 ---
 
-## 🛠️ Puesta en Marcha en un Equipo Nuevo o Nueva Cuenta
+## 🛠️ Puesta en Marcha (Configuración en 3 Pasos)
 
-### Paso 1: Instalar dependencias
-Haz doble clic en **`instalar_dependencias.bat`**  
-*(O ejecuta en la terminal: `pip install -r requirements.txt`)*
+### Paso 1: Iniciar el servidor local
+Haz doble clic en **`iniciar_visor.bat`**.  
+*(En el primer arranque, instalará automáticamente las dependencias necesarias de Python sin pasos manuales).*
+- Se abrirá la terminal con el **Panel de Control** y tu navegador en: [http://127.0.0.1:8080](http://127.0.0.1:8080).
 
 ### Paso 2: Cargar la extensión en el navegador
 1. Abre tu navegador y dirígete a:
@@ -50,13 +49,9 @@ Haz doble clic en **`instalar_dependencias.bat`**
    - En Brave: `brave://extensions/`
 2. Activa el interruptor **"Modo de desarrollador"** (Developer mode) en la esquina superior derecha.
 3. Haz clic en el botón **"Cargar descomprimida"** (Load unpacked).
-4. Selecciona la carpeta **`extension`** dentro de este proyecto.
+4. Selecciona la carpeta **`extension`** dentro de este proyecto *(puedes usar el botón "📋 Copiar ruta" que aparece en el visor web)*.
 
-### Paso 3: Iniciar el servidor y visor local
-Haz doble clic en **`iniciar_visor.bat`** (o en **`iniciar_visor_segundo_plano.vbs`** si prefieres que no quede una ventana abierta).
-- Se abrirá automáticamente tu navegador en: [http://127.0.0.1:8080](http://127.0.0.1:8080).
-
-### Paso 4: Abrir WhatsApp Web
+### Paso 3: Abrir WhatsApp Web
 1. Ingresa a [https://web.whatsapp.com](https://web.whatsapp.com) e inicia sesión con cualquier cuenta de WhatsApp vinculando el código QR.
 2. Observarás un widget flotante en la esquina inferior izquierda: **"Backup WhatsApp"**.
 3. Abre cualquier conversación para que la extensión capture la clave criptográfica de la sesión (`🎯 ¡Clave maestra verificada!`).

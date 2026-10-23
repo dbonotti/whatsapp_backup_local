@@ -12,7 +12,6 @@
   const candidateKeys = []; // Pool de todas las CryptoKey secretas detectadas [{ key, algName }]
   let isVerifyingKeys = false;
   let knownMessageKeys = null; // Set en memoria de IDs de mensajes ya sincronizados con éxito
-  let lastIdbMessageCount = -1;
   let lastContactsHash = null;
   let lastChatsHash = null;
   let lastContactsSyncTime = 0;
@@ -1245,7 +1244,6 @@
       console.log(`[BackupWA] Detectados ${newKeys.length} mensajes en IndexedDB pendientes de respaldo.`);
       scrolledMsgs = await getRecordsByKeys(db, "message", newKeys);
     }
-    lastIdbMessageCount = allKeys.length;
 
     if (scrolledMsgs.length === 0) return recentMsgs;
 
