@@ -21,10 +21,11 @@ rem 2. Comprobar actualizaciones en GitHub (garantizando seguridad de datos)
 where git >nul 2>&1
 if %errorlevel% equ 0 if exist ".git" (
     echo Verificando si hay actualizaciones en GitHub...
-    git fetch origin main --quiet >nul 2>&1
+    git config --global --add safe.directory "%CD:\=/%" >nul 2>&1
+    git -c safe.directory=* fetch origin main --quiet >nul 2>&1
     if !errorlevel! equ 0 (
         set BEHIND=0
-        for /f %%i in ('git rev-list HEAD..origin/main --count 2^>nul') do set BEHIND=%%i
+        for /f %%i in ('git -c safe.directory=* rev-list HEAD..origin/main --count 2^>nul') do set BEHIND=%%i
         if defined BEHIND if not "!BEHIND!"=="0" (
             echo.
             echo ========================================================
@@ -32,7 +33,7 @@ if %errorlevel% equ 0 if exist ".git" (
             echo   Hay !BEHIND! actualizacion^(es^) disponible^(s^) en GitHub.
             echo ========================================================
             echo Ultimos cambios:
-            git log HEAD..origin/main --oneline -5
+            git -c safe.directory=* log HEAD..origin/main --oneline -5
             echo ========================================================
             echo.
             set "APPLY_UPDATE=S"
@@ -44,9 +45,9 @@ if %errorlevel% equ 0 if exist ".git" (
                 
                 echo [2/3] Descargando ultimos cambios de GitHub...
                 set EXT_UPDATED=0
-                for /f %%f in ('git diff HEAD origin/main --name-only -- extension 2^>nul') do set EXT_UPDATED=1
+                for /f %%f in ('git -c safe.directory=* diff HEAD origin/main --name-only -- extension 2^>nul') do set EXT_UPDATED=1
                 
-                git pull origin main
+                git -c safe.directory=* pull origin main
                 if !errorlevel! equ 0 (
                     echo [OK] Codigo actualizado con exito.
                     if "!EXT_UPDATED!"=="1" (

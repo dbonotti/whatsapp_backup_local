@@ -2050,8 +2050,13 @@ def generate_chat_html_export(chat_id, embed_media=False):
     return "".join(html_parts)
 
 _sync_lock = threading.Lock()
+_ui_lock = threading.Lock()
 _sync_batch_count = 0
 _total_messages_synced = 0
+_last_sync_status_text = "Esperando datos de sincronización..."
+_last_update_status_text = "Presiona [U] para comprobar"
+_update_in_progress = False
+_server_url = None
 
 def get_disk_extension_version():
     """Lee la versión de la extensión declarada en extension/manifest.json."""
@@ -2065,64 +2070,158 @@ def get_disk_extension_version():
         pass
     return "1.0.0"
 
+def run_git_cmd(args, timeout=15):
+    """Ejecuta un comando de Git garantizando safe.directory y devolviendo CompletedProcess."""
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    cmd = ["git", "-c", "safe.directory=*"] + args
+    try:
+        res = subprocess.run(cmd, cwd=base_dir, capture_output=True, text=True, timeout=timeout)
+        if res.returncode != 0 and "dubious ownership" in (res.stderr or ""):
+            safe_path = base_dir.replace("\\", "/")
+            subprocess.run(["git", "config", "--global", "--add", "safe.directory", safe_path], capture_output=True)
+            res = subprocess.run(cmd, cwd=base_dir, capture_output=True, text=True, timeout=timeout)
+        return res
+    except Exception as e:
+        return subprocess.CompletedProcess(cmd, returncode=1, stdout="", stderr=str(e))
+
+def render_dashboard(url=None):
+    """Dibuja el panel de control completo sin scroll vertical en la consola."""
+    global _server_url
+    with _ui_lock:
+        if url:
+            _server_url = url
+        current_url = _server_url or f"http://127.0.0.1:{PORT}"
+        os.system("cls" if os.name == "nt" else "clear")
+        lines = [
+            "========================================================================",
+            "             WHATSAPP BACKUP & VISOR - PANEL DE CONTROL                 ",
+            "========================================================================",
+            f"  Dirección local:       {current_url}",
+            f"  API Incremental:       {current_url}/api/sync",
+            f"  Búsqueda FTS5:         {current_url}/api/search?q=...",
+            "",
+            "  Atajos en esta consola:",
+            "    [V]        Abrir el visor en el navegador",
+            "    [L]        Abrir ventana de logs de sincronización en vivo",
+            "    [U]        Buscar y aplicar actualizaciones de GitHub",
+            "    [Ctrl + C] Detener el servidor",
+            "",
+            r"  Archivo de logs:       logs\sync.log (o ejecuta ver_logs.bat)",
+            "========================================================================",
+            f"  Actualizaciones:       {_last_update_status_text}",
+            "========================================================================",
+            f"  Estado: {_last_sync_status_text}"
+        ]
+        # Dejar el cursor al final de la última línea con \r para actualizaciones directas
+        sys.stdout.write("\n".join(lines) + "\r")
+        sys.stdout.flush()
+
 def check_and_apply_update(url):
-    """Verifica si hay actualizaciones en GitHub y permite aplicarlas interactivamente sin pérdida de datos."""
+    """Verifica si hay actualizaciones en GitHub sin provocar scroll en el panel."""
+    global _last_update_status_text, _update_in_progress
+    if _update_in_progress:
+        return
+    _update_in_progress = True
+
     base_dir = os.path.dirname(os.path.abspath(__file__))
     if not os.path.isdir(os.path.join(base_dir, ".git")):
-        print("\n\n[Actualizador] Esta carpeta no fue clonada con Git. No se puede actualizar automáticamente.\r", end="", flush=True)
+        _last_update_status_text = "[Aviso] Carpeta no clonada con Git. No se puede actualizar."
+        _update_in_progress = False
+        render_dashboard(url)
         return
 
-    print("\n\n" + "=" * 65)
-    print("        BUSCADOR DE ACTUALIZACIONES EN GITHUB")
-    print("=" * 65)
-    print("Consultando servidor de GitHub...")
+    now_str = datetime.now().strftime("%H:%M:%S")
+    _last_update_status_text = f"Consultando servidor de GitHub... [{now_str}]"
+    render_dashboard(url)
+
+    res = run_git_cmd(["fetch", "origin", "main", "--quiet"], timeout=12)
+    now_str = datetime.now().strftime("%H:%M:%S")
+    if res.returncode != 0:
+        err = (res.stderr or "").strip().lower()
+        if "could not resolve host" in err or "failed to connect" in err or "timed out" in err:
+            err_desc = "Sin conexión a GitHub (verifica tu internet)"
+        elif "not appear to be a git repository" in err or "not found" in err:
+            err_desc = "Repositorio remoto no encontrado"
+        elif "permission denied" in err or "authentication" in err:
+            err_desc = "Error de autenticación con GitHub"
+        else:
+            first_line = (res.stderr or "").strip().split("\n")[0]
+            err_desc = first_line[:50] if first_line else "Error consultando GitHub"
+
+        append_sync_log(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [Update Error] {res.stderr or res.stdout}")
+        _last_update_status_text = f"[Error] {err_desc} ({now_str})"
+        _update_in_progress = False
+        render_dashboard(url)
+        return
+
+    count_res = run_git_cmd(["rev-list", "HEAD..origin/main", "--count"], timeout=10)
+    count = int(count_res.stdout.strip() or "0")
+    if count == 0:
+        _last_update_status_text = f"[✓] ¡Sistema al día con GitHub! (comprobado {now_str})"
+        _update_in_progress = False
+        render_dashboard(url)
+        return
+
+    _last_update_status_text = f"[!] Hay {count} actualización(es) disponible(s)"
+
+    # Mostrar detalles de actualización en vista limpia
+    os.system("cls" if os.name == "nt" else "clear")
+    print("========================================================================")
+    print(f"       [!] ACTUALIZACIÓN DISPONIBLE EN GITHUB ({count} cambios)")
+    print("========================================================================")
+    print("Últimos cambios:")
+    log_res = run_git_cmd(["log", "HEAD..origin/main", "--oneline", "-5"], timeout=10)
+    print(log_res.stdout.strip())
+    print("========================================================================")
+    print("Seguridad garantizada: se creará un snapshot previo de whatsapp_backup.db.")
+    print("")
     try:
-        res = subprocess.run(["git", "fetch", "origin", "main", "--quiet"], cwd=base_dir, capture_output=True, timeout=12)
-        if res.returncode != 0:
-            print("[Error] No se pudo conectar con GitHub. Verifica tu conexión a internet.")
-            print("=" * 65 + "\n")
-            return
-
-        count_res = subprocess.run(["git", "rev-list", "HEAD..origin/main", "--count"], cwd=base_dir, capture_output=True, text=True)
-        count = int(count_res.stdout.strip() or "0")
-        if count == 0:
-            print("[✓] ¡Tu sistema ya está actualizado a la última versión disponible!")
-            print("=" * 65 + "\n")
-            return
-
-        print(f"[!] Se encontraron {count} actualización(es) disponible(s).")
-        print("\nÚltimos cambios:")
-        log_res = subprocess.run(["git", "log", "HEAD..origin/main", "--oneline", "-5"], cwd=base_dir, capture_output=True, text=True)
-        print(log_res.stdout.strip())
-        print("=" * 65)
-        print("Seguridad garantizada: se creará un snapshot previo de whatsapp_backup.db.")
         resp = input("¿Deseas aplicar la actualización ahora? (S/N) [S]: ").strip().upper()
-        if resp in ("", "S", "SI"):
-            db_path = os.path.join(base_dir, "whatsapp_backup.db")
-            if os.path.isfile(db_path):
-                backups_dir = os.path.join(base_dir, "backups")
-                os.makedirs(backups_dir, exist_ok=True)
-                bak_name = f"db_backup_pre_update_{int(time.time())}.db"
-                shutil.copy2(db_path, os.path.join(backups_dir, bak_name))
-                print(f"[1/3] Copia preventiva de seguridad creada en: backups/{bak_name}")
-            else:
-                print("[1/3] Sin base de datos previa que respaldar.")
+    except Exception:
+        resp = "N"
 
-            print("[2/3] Descargando código actualizado...")
-            pull_res = subprocess.run(["git", "pull", "origin", "main"], cwd=base_dir, capture_output=True, text=True)
-            if pull_res.returncode == 0:
-                print("      Código actualizado correctamente.")
-                print("[3/3] Verificando dependencias de Python...")
-                subprocess.run([sys.executable, "-m", "pip", "install", "-r", "requirements.txt", "--quiet"], cwd=base_dir)
-                print("\n" + "=" * 65)
-                print("¡Actualización completada!")
-                print("Reinicia el servidor (Ctrl+C y vuelve a abrir iniciar_visor.bat)")
-                print("para que los cambios en Python surtan efecto.")
-                print("=" * 65 + "\n")
-            else:
-                print(f"      [Error] Falló la descarga: {pull_res.stderr}")
-    except Exception as e:
-        print(f"[Error en actualizador]: {e}")
+    if resp in ("", "S", "SI"):
+        db_path = os.path.join(base_dir, "whatsapp_backup.db")
+        if os.path.isfile(db_path):
+            backups_dir = os.path.join(base_dir, "backups")
+            os.makedirs(backups_dir, exist_ok=True)
+            bak_name = f"db_backup_pre_update_{int(time.time())}.db"
+            shutil.copy2(db_path, os.path.join(backups_dir, bak_name))
+            print(f"\n[1/3] Copia preventiva de seguridad creada en: backups/{bak_name}")
+        else:
+            print("\n[1/3] Sin base de datos previa que respaldar.")
+
+        print("[2/3] Descargando código actualizado...")
+        pull_res = run_git_cmd(["pull", "origin", "main"], timeout=30)
+        if pull_res.returncode == 0:
+            print("      Código actualizado correctamente.")
+            print("[3/3] Verificando dependencias de Python...")
+            subprocess.run([sys.executable, "-m", "pip", "install", "-r", "requirements.txt", "--quiet"], cwd=base_dir)
+            print("\n" + "=" * 65)
+            print("¡Actualización completada!")
+            print("Reinicia el servidor (Ctrl+C y vuelve a abrir iniciar_visor.bat)")
+            print("para que los cambios surtan efecto.")
+            print("=" * 65)
+            _last_update_status_text = f"[✓] Actualizado con éxito a la última versión ({datetime.now().strftime('%H:%M:%S')})"
+            print("\nPresiona Enter para volver al Panel de Control...")
+            try:
+                input()
+            except Exception:
+                pass
+        else:
+            print(f"      [Error] Falló la descarga: {pull_res.stderr}")
+            append_sync_log(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [Update Pull Error] {pull_res.stderr}")
+            _last_update_status_text = f"[Error] Falló la descarga de GitHub ({datetime.now().strftime('%H:%M:%S')})"
+            print("\nPresiona Enter para volver al Panel de Control...")
+            try:
+                input()
+            except Exception:
+                pass
+    else:
+        _last_update_status_text = f"[Aviso] {count} actualización(es) pendiente(s) de aplicar"
+
+    _update_in_progress = False
+    render_dashboard(url)
 
 def open_logs_window():
     """Abre la ventana dedicada de logs en una consola independiente."""
@@ -2171,37 +2270,41 @@ def start_keyboard_listener(url):
         pass
 
 def log_sync_status(stats):
-    global _sync_batch_count, _total_messages_synced
+    global _sync_batch_count, _total_messages_synced, _last_sync_status_text
+    msgs = stats.get("messages_saved", 0)
+    contacts = stats.get("contacts_saved", 0)
+    chats = stats.get("chats_saved", 0)
+    now_time = datetime.now().strftime("%H:%M:%S")
+    now_full = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
     with _sync_lock:
         _sync_batch_count += 1
-        msgs = stats.get("messages_saved", 0)
         _total_messages_synced += msgs
-        contacts = stats.get("contacts_saved", 0)
-        chats = stats.get("chats_saved", 0)
-        now_time = datetime.now().strftime("%H:%M:%S")
-        now_full = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-        # 1. Guardar log detallado en sync.log para la ventana de logs
-        append_sync_log(
-            f"[{now_full}] [Sync] Lote #{_sync_batch_count}: +{msgs} msgs, {chats} chats, {contacts} contactos | Detalle: {stats}"
-        )
-
-        # 2. Actualizar línea única en el panel de control
-        status_text = (
-            f"  Estado: [{now_time}] Lote #{_sync_batch_count} (+{msgs}) | "
+        _last_sync_status_text = (
+            f"[{now_time}] Lote #{_sync_batch_count} (+{msgs}) | "
             f"Msgs: {_total_messages_synced} | Chats: {chats} | Contactos: {contacts}"
         )
-        try:
-            cols = shutil.get_terminal_size(fallback=(80, 24)).columns
-            max_len = max(40, cols - 1)
-        except Exception:
-            max_len = 79
 
-        if len(status_text) > max_len:
-            status_text = status_text[:max_len]
+    # 1. Guardar log detallado en sync.log para la ventana de logs
+    append_sync_log(
+        f"[{now_full}] [Sync] Lote #{_sync_batch_count}: +{msgs} msgs, {chats} chats, {contacts} contactos | Detalle: {stats}"
+    )
 
-        sys.stdout.write(f"\r{status_text.ljust(max_len)}")
-        sys.stdout.flush()
+    # 2. Actualizar línea única en el panel de control si no hay actualización en curso
+    with _ui_lock:
+        if not _update_in_progress:
+            status_text = f"  Estado: {_last_sync_status_text}"
+            try:
+                cols = shutil.get_terminal_size(fallback=(80, 24)).columns
+                max_len = max(40, cols - 1)
+            except Exception:
+                max_len = 79
+
+            if len(status_text) > max_len:
+                status_text = status_text[:max_len]
+
+            sys.stdout.write(f"\r{status_text.ljust(max_len)}")
+            sys.stdout.flush()
 
 class BackupServerHandler(BaseHTTPRequestHandler):
     def is_trusted_origin(self):
@@ -2606,27 +2709,9 @@ def run():
     server = ThreadingHTTPServer(("127.0.0.1", PORT), BackupServerHandler)
     url = f"http://127.0.0.1:{PORT}"
 
-    # Limpiar consola para que el Panel de Control quede anclado arriba
-    os.system("cls" if os.name == "nt" else "clear")
-
     append_sync_log(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [Servidor] Servidor iniciado en {url}")
 
-    print("========================================================================")
-    print("             WHATSAPP BACKUP & VISOR - PANEL DE CONTROL                 ")
-    print("========================================================================")
-    print(f"  Dirección local:       {url}")
-    print(f"  API Incremental:       {url}/api/sync")
-    print(f"  Búsqueda FTS5:         {url}/api/search?q=...")
-    print("")
-    print("  Atajos en esta consola:")
-    print("    [V]        Abrir el visor en el navegador")
-    print("    [L]        Abrir ventana de logs de sincronización en vivo")
-    print("    [U]        Buscar y aplicar actualizaciones de GitHub")
-    print("    [Ctrl + C] Detener el servidor")
-    print("")
-    print(f"  Archivo de logs:       logs\\sync.log (o ejecuta ver_logs.bat)")
-    print("========================================================================")
-    print("  Estado: Esperando datos de sincronización...\r", end="", flush=True)
+    render_dashboard(url)
 
     start_keyboard_listener(url)
     webbrowser.open(url)
