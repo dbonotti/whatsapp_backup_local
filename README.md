@@ -1,9 +1,79 @@
-# WhatsApp Backup Local & Incremental (Edición Limpia y Portable)
+# 💬 WhatsApp Backup Local & Incremental
 
-Sistema de respaldo pasivo, incremental y 100% seguro para WhatsApp Web. Permite archivar conversaciones completas, contactos y archivos multimedia (fotos, audios, notas de voz, videos y documentos descifrados localmente) en una base de datos local SQLite con motor de búsqueda indexada (FTS5) y un visor web moderno inspirado en WhatsApp Web.
+> Sistema pasivo, privado e incremental para respaldar y visualizar conversaciones de WhatsApp Web en tu propio equipo, con descifrado multimedia local, búsqueda indexada ultrarrápida y visor web moderno.
 
+> [!IMPORTANT]
 > **Seguridad y Cero Riesgo de Suspensión:**  
-> A diferencia de librerías no oficiales (como Baileys o WA-JS) o bots que emulan clics en pantalla, este sistema **no envía peticiones de red sospechosas ni manipula el DOM**. Funciona de manera puramente pasiva leyendo el almacenamiento local estándar del navegador (`IndexedDB`) e interceptando de forma transparente las claves criptográficas temporales del cliente (`WebCrypto`).
+> A diferencia de librerías no oficiales (como Baileys o WA-JS) o bots automatizados, este sistema **no emite peticiones no autorizadas a Meta ni simula clics**. Opera de forma estrictamente pasiva leyendo el almacenamiento local estándar del navegador (`IndexedDB`) e interceptando de forma transparente las claves criptográficas temporales del cliente (`WebCrypto`).
+
+---
+
+## 🚀 Requisitos Previos
+
+* **Python 3.8 o superior** (al instalar en Windows, marcar la casilla *"Add Python to PATH"*).
+* **Navegador web basado en Chromium**: Google Chrome, Brave, Microsoft Edge u Opera.
+
+---
+
+## 🛠️ Puesta en Marcha (Guía en 3 Pasos)
+
+### Paso 1: Iniciar el servidor local
+Haz doble clic en **`iniciar_visor.bat`**.
+* *En el primer arranque, el lanzador instalará automáticamente las dependencias de Python necesarias (`cryptography`).*
+* Se abrirá la terminal con el **Panel de Control** y tu navegador web en: [http://127.0.0.1:8080](http://127.0.0.1:8080).
+
+### Paso 2: Cargar la extensión en el navegador
+1. Abre tu navegador y dirígete a:
+   * **Chrome:** `chrome://extensions/`
+   * **Brave:** `brave://extensions/`
+   * **Edge:** `edge://extensions/`
+2. Activa el interruptor **"Modo de desarrollador"** en la esquina superior derecha.
+3. Haz clic en el botón **"Cargar descomprimida"** (*Load unpacked*).
+4. Selecciona la carpeta **`extension`** dentro de este proyecto *(el visor web incluye un botón "📋 Copiar ruta" para pegarla directamente)*.
+
+### Paso 3: Abrir WhatsApp Web
+1. Ingresa a [https://web.whatsapp.com](https://web.whatsapp.com) y vincula tu cuenta normalmente mediante código QR.
+2. Observarás un widget en la esquina inferior izquierda: **"Backup WhatsApp"**.
+3. Abre cualquier chat para capturar la clave de sesión (`🎯 ¡Clave maestra verificada!`).
+4. Haz clic en:
+   * **`[Todo (Media)]`**: Para sincronizar el historial completo y encolar la descarga y descifrado de fotos, audios y documentos.
+   * **`[Novedades]`**: Para respaldar únicamente mensajes recientes de la última hora.
+   *(La extensión continuará respaldando automáticamente nuevos mensajes cada 60 segundos de forma pasiva y desatendida).*
+
+---
+
+## ⌨️ Panel de Control y Atajos de Teclado
+
+La consola de `iniciar_visor.bat` funciona como un centro interactivo mientras el servidor está activo:
+
+| Atajo | Acción | Descripción |
+| :---: | :--- | :--- |
+| **`[V]`** | **Abrir Visor** | Abre o enfoca el visor web en tu navegador predeterminado. |
+| **`[L]`** | **Ver Logs en Vivo** | Abre una ventana independiente con el seguimiento de sincronización en tiempo real. |
+| **`[U]`** | **Buscar Actualizaciones** | Comprueba si hay mejoras en GitHub y permite aplicarlas interactivamente. |
+| **`Ctrl + C`** | **Detener Servidor** | Cierra de manera limpia y ordenada el servidor SQLite. |
+
+---
+
+## 🔄 Actualizaciones Seguras en 1 Clic
+
+El sistema está diseñado para que actualizar nunca ponga en riesgo tu información:
+
+* **Protección de Datos Garantizada:** Ni la base de datos (`whatsapp_backup.db`) ni tus archivos descargados (`media/`) forman parte de Git. Antes de descargar cualquier actualización, se genera automáticamente una copia de respaldo preventiva en `backups/`.
+* **Actualización del Servidor (`iniciar_visor.bat`):** Cada vez que inicias el visor, comprueba en ~1 segundo si hay versiones nuevas y te ofrece instalarlas.
+* **Actualización Asistida de la Extensión:** Si hay una versión más reciente de la extensión en disco, el widget en WhatsApp Web mostrará el botón `[🔄 Actualizar a v...]`. Al hacer clic, se recarga la extensión en memoria y la pestaña automáticamente, sin pasos manuales en la configuración del navegador.
+
+---
+
+## ✨ Características Principales
+
+* **🎨 Visor Web Inspirado en WhatsApp:** Modo claro y oscuro (`☀️` / `🌙`), avatares dinámicos, citas y respuestas interactivas, estados de lectura `✓✓` y paginación fluida para chats con decenas de miles de mensajes.
+* **🔐 Descifrado Multimedia Local y Streaming HTTP Range:** Descarga de archivos cifrados (`.enc`) desde los servidores de WhatsApp y descifrado local con HKDF-SHA256 + AES-256-CBC. Soporta reproducción continua de video y audio con salto temporal instantáneo (HTTP 206).
+* **🎙️ Reproductor de Notas de Voz:** Control de velocidad (`1x` ➔ `1.5x` ➔ `2x`) y encadenamiento automático entre audios consecutivos.
+* **🔍 Búsqueda Rápida de Texto Completo (FTS5):** Motor indexado SQLite con soporte insensible a tildes y mayúsculas.
+* **🏷️ Filtros Dinámicos:** Filtrado por fecha (`Desde` / `Hasta`) y por tipo de archivo (`📷 Fotos`, `🎤 Audios`, `📄 Documentos`, `🎬 Videos`).
+* **📦 Exportación Completa:** Exporta cualquier conversación a formato HTML ligero o a un archivo `.html` 100% autónomo con todas las fotos y audios incrustados en Base64 para visualizarlos sin servidor.
+* **💾 Copias de Seguridad Manuales:** Generación de snapshots atómicos y descarga de backups de la base de datos en formato `.db`.
 
 ---
 
@@ -11,71 +81,16 @@ Sistema de respaldo pasivo, incremental y 100% seguro para WhatsApp Web. Permite
 
 ```text
 whatsapp_backup_local/
-├── extension/                       # Extensión para el navegador (Manifest V3)
-│   ├── manifest.json
-│   ├── background.js                # Service worker puente hacia el servidor local
-│   ├── bridge.js                    # Conector seguro entre contextos de página
-│   └── content.js                   # Extractor pasivo incremental y widget visual
-├── whatsapp_viewer.py               # Servidor local HTTP, panel de control y visor web
-├── db_manager.py                    # Gestor de base de datos SQLite (WAL mode, FTS5)
-├── media_manager.py                 # Descifrador de multimedia (HKDF-SHA256 + AES-256-CBC)
-├── iniciar_visor.bat                # Lanzador con actualizador automático y panel de control
-├── ver_logs.bat                     # Visor en vivo de logs de sincronización
-├── requirements.txt                 # Dependencias mínimas del sistema (cryptography)
-└── README.md                        # Esta guía de uso
+├── extension/             # Extensión para el navegador (Manifest V3)
+│   ├── manifest.json      # Declaración de permisos y configuración de la extensión
+│   ├── background.js      # Service worker puente hacia el servidor local
+│   ├── bridge.js          # Conector seguro entre contextos de página y extensión
+│   └── content.js         # Extractor pasivo incremental y widget visual en WhatsApp Web
+├── whatsapp_viewer.py     # Servidor local HTTP, panel de control y visor web
+├── db_manager.py          # Gestor de base de datos SQLite (WAL mode, FTS5)
+├── media_manager.py       # Descifrador de multimedia (HKDF-SHA256 + AES-256-CBC)
+├── iniciar_visor.bat      # Lanzador con autoinstalador, panel de control y actualizador
+├── ver_logs.bat           # Monitor en vivo de logs de sincronización
+├── requirements.txt       # Dependencias mínimas de Python (cryptography)
+└── README.md              # Documentación y guía de uso
 ```
-
----
-
-## 🔄 Actualizaciones Seguras en 1 Clic
-
-El sistema incluye un sistema de actualización inteligente diseñado para **garantizar la total preservación de tus datos**:
-* **En el Visor (`iniciar_visor.bat`):** Al iniciar, verifica si hay nuevas versiones en GitHub. Si aceptas actualizar, realiza un respaldo preventivo de `whatsapp_backup.db` en la carpeta `backups/` antes de descargar el código. También puedes presionar `[U]` en cualquier momento en el panel de control.
-* **En la Extensión (WhatsApp Web):** Si el servidor detecta una versión más reciente en disco, el widget flotante mostrará el botón `🔄 Actualizar a v...`. Al hacer clic, recarga la extensión y la pestaña automáticamente sin necesidad de entrar a la configuración del navegador.
-```
-
----
-
-## 🚀 Requisitos Previos
-
-1. **Python 3.8 o superior** instalado en el equipo (marcar la casilla *"Add Python to PATH"* durante la instalación).
-2. **Navegador basado en Chromium**: Google Chrome, Microsoft Edge, Brave u Opera.
-
----
-
-## 🛠️ Puesta en Marcha (Configuración en 3 Pasos)
-
-### Paso 1: Iniciar el servidor local
-Haz doble clic en **`iniciar_visor.bat`**.  
-*(En el primer arranque, instalará automáticamente las dependencias necesarias de Python sin pasos manuales).*
-- Se abrirá la terminal con el **Panel de Control** y tu navegador en: [http://127.0.0.1:8080](http://127.0.0.1:8080).
-
-### Paso 2: Cargar la extensión en el navegador
-1. Abre tu navegador y dirígete a:
-   - En Google Chrome: `chrome://extensions/`
-   - En Microsoft Edge: `edge://extensions/`
-   - En Brave: `brave://extensions/`
-2. Activa el interruptor **"Modo de desarrollador"** (Developer mode) en la esquina superior derecha.
-3. Haz clic en el botón **"Cargar descomprimida"** (Load unpacked).
-4. Selecciona la carpeta **`extension`** dentro de este proyecto *(puedes usar el botón "📋 Copiar ruta" que aparece en el visor web)*.
-
-### Paso 3: Abrir WhatsApp Web
-1. Ingresa a [https://web.whatsapp.com](https://web.whatsapp.com) e inicia sesión con cualquier cuenta de WhatsApp vinculando el código QR.
-2. Observarás un widget flotante en la esquina inferior izquierda: **"Backup WhatsApp"**.
-3. Abre cualquier conversación para que la extensión capture la clave criptográfica de la sesión (`🎯 ¡Clave maestra verificada!`).
-4. Haz clic en:
-   - **`[Todo (Media)]`**: Para realizar la primera sincronización completa del historial y encolar la descarga y descifrado de imágenes, audios y documentos.
-   - **`[Novedades]`**: Para sincronizar únicamente los mensajes y novedades de la última hora.
-   *(La extensión también realiza sincronizaciones automáticas periódicas cada 60 segundos de forma desatendida)*.
-
----
-
-## ✨ Características Principales
-
-- **Visor Web Réplica WhatsApp (Modo Claro y Modo Oscuro)**: Interfaz limpia con soporte nativo para tema oscuro (`🌙`/`☀️`), avatares dinámicos, citas/respuestas (`quotedMsg`) interactivas, estados de lectura `✓✓` y carga progresiva paginada para conversaciones con miles de mensajes.
-- **Descifrado Multimedia Real y Streaming HTTP Range (`206 Partial Content`)**: Descarga continua de archivos `.enc` desde la CDN de WhatsApp, descifrado mediante HKDF-SHA256 y AES-256-CBC, y panel de estado (`🎬 Media`) con botón para reintentar descargas fallidas. Permite adelantar y retroceder pistas de audio y video sin esperas.
-- **Reproductor de Voz Avanzado**: Selector de velocidad (`1x` ➔ `1.5x` ➔ `2x`) y reproducción continua automática al finalizar una nota de voz.
-- **Filtros Dinámicos**: Píldoras para filtrar por tipo (`📷 Fotos`, `🎤 Audios`, `📄 Documentos`, `🎬 Videos`) y selectores de fecha (`Desde` / `Hasta`).
-- **Búsqueda Instantánea FTS5**: Motor de texto completo en SQLite con soporte para acentos y diacríticos (`remove_diacritics 1`).
-- **Exportación a HTML Ligero o Autónomo**: Botones para exportar cualquier conversación en HTML ligero o en un único archivo `.html` autónomo (`📦 Exportar Autónomo`) con imágenes y audios incrustados en Base64.
-- **Copias de Seguridad Manuales Consistentes**: Botón en la cabecera (`💾 Backup`) para generar y descargar respaldos puntuales de la base de datos SQLite en `backups/` mediante `sqlite3.Connection.backup()`.
