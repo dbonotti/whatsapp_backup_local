@@ -21,7 +21,6 @@ whatsapp_backup_local/
 ├── media_manager.py                 # Descifrador de multimedia (HKDF-SHA256 + AES-256-CBC)
 ├── iniciar_visor.bat                # Lanzador con actualizador automático y panel de control
 ├── ver_logs.bat                     # Visor en vivo de logs de sincronización
-├── iniciar_visor_segundo_plano.vbs  # Lanzador silencioso en segundo plano
 ├── requirements.txt                 # Dependencias mínimas del sistema (cryptography)
 └── README.md                        # Esta guía de uso
 ```
