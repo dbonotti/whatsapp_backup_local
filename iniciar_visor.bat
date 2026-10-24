@@ -29,7 +29,7 @@ if %errorlevel% equ 0 if exist ".git" (
             echo.
             echo ========================================================
             echo   [ACTUALIZACION DISPONIBLE]
-            echo   Hay !BEHIND! actualizacion(es) disponible(s) en GitHub.
+            echo   Hay !BEHIND! actualizacion^(es^) disponible^(s^) en GitHub.
             echo ========================================================
             echo Ultimos cambios:
             git log HEAD..origin/main --oneline -5

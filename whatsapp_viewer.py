@@ -678,6 +678,33 @@ HTML_UI = """<!DOCTYPE html>
     }
     .btn-copy-path:hover { opacity: 0.9; }
 
+    /* Indicador en vivo de espera en onboarding */
+    .onboarding-live-status {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-top: 16px;
+      padding: 10px 14px;
+      background: rgba(0, 168, 132, 0.08);
+      border: 1px solid rgba(0, 168, 132, 0.28);
+      border-radius: 8px;
+      font-size: 13px;
+      color: var(--text-primary);
+    }
+    .live-pulse-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--accent);
+      box-shadow: 0 0 8px var(--accent);
+      flex-shrink: 0;
+      animation: pulseDot 1.8s infinite ease-in-out;
+    }
+    @keyframes pulseDot {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.3; transform: scale(0.8); }
+    }
+
     /* Notificación Toast */
     #toast {
       position: fixed;
@@ -1070,11 +1097,19 @@ HTML_UI = """<!DOCTYPE html>
       return 'Sin mensajes';
     }
 
+    let syncIntervalId = null;
+
     async function init() {
       initTheme();
       await updateSyncStatus();
       await loadChats();
-      setInterval(updateSyncStatus, 5000);
+      // Si todavía no hay chats respaldados, consultar cada 2s para que la pantalla se actualice de inmediato al conectar WhatsApp Web
+      startSyncPolling((!allChats || allChats.length === 0) ? 2000 : 4000);
+    }
+
+    function startSyncPolling(intervalMs) {
+      if (syncIntervalId) clearInterval(syncIntervalId);
+      syncIntervalId = setInterval(updateSyncStatus, intervalMs);
     }
 
     async function updateSyncStatus() {
@@ -1083,28 +1118,58 @@ HTML_UI = """<!DOCTYPE html>
         const data = await res.json();
         const prevLastTs = lastSyncData.last_timestamp;
         const prevTotalMsgs = lastSyncData.total_messages;
+        const prevTotalChats = lastSyncData.total_chats;
         const prevValidMsgs = lastSyncData.valid_messages;
         const prevDownloadedMedia = lastSyncData.downloaded_media;
         const prevExpiredMedia = lastSyncData.expired_media;
+        const hadNoChats = (!allChats || allChats.length === 0);
+
         lastSyncData = data;
-        document.getElementById('syncStatusText').textContent = `${data.total_messages.toLocaleString()} msgs`;
-        document.getElementById('dbStatsText').textContent = 
-          `Base de datos: ${data.total_messages.toLocaleString()} mensajes | ${data.total_chats} chats | ${data.downloaded_media || 0} archivos multimedia (${data.pending_media || 0} en cola)`;
-        if (document.getElementById('media-modal').style.display === 'flex') {
+
+        const syncStatusEl = document.getElementById('syncStatusText');
+        if (syncStatusEl) {
+          syncStatusEl.textContent = `${(data.total_messages || 0).toLocaleString()} msgs`;
+        }
+
+        const dbStatsEl = document.getElementById('dbStatsText');
+        if (dbStatsEl) {
+          dbStatsEl.textContent = 
+            `Base de datos: ${(data.total_messages || 0).toLocaleString()} mensajes | ${data.total_chats || 0} chats | ${data.downloaded_media || 0} archivos multimedia (${data.pending_media || 0} en cola)`;
+        }
+
+        if (document.getElementById('media-modal') && document.getElementById('media-modal').style.display === 'flex') {
           renderMediaStats(data);
         }
-        const messagesChanged = prevLastTs !== undefined && (data.last_timestamp !== prevLastTs || data.total_messages !== prevTotalMsgs || data.valid_messages !== prevValidMsgs);
-        const mediaChanged = prevDownloadedMedia !== undefined && (data.downloaded_media !== prevDownloadedMedia || data.expired_media !== prevExpiredMedia);
-        // Si llegaron nuevos mensajes durante la sincronización en segundo plano, reordenar la lista de chats automáticamente
-        if (messagesChanged) {
+
+        const messagesChanged = prevLastTs !== undefined && (
+          data.last_timestamp !== prevLastTs || 
+          data.total_messages !== prevTotalMsgs || 
+          data.valid_messages !== prevValidMsgs
+        );
+        const chatsChanged = prevTotalChats !== undefined && (data.total_chats !== prevTotalChats);
+        const mediaChanged = prevDownloadedMedia !== undefined && (
+          data.downloaded_media !== prevDownloadedMedia || 
+          data.expired_media !== prevExpiredMedia
+        );
+        const firstDataArrived = hadNoChats && ((data.total_chats || 0) > 0 || (data.total_messages || 0) > 0);
+
+        // Si llegaron chats o mensajes nuevos, recargar la lista de chats automáticamente
+        if (messagesChanged || chatsChanged || firstDataArrived) {
           await loadChats();
+          // Al pasar de 0 a tener chats, ajustar la frecuencia de refresco a 4s
+          if (hadNoChats && allChats && allChats.length > 0) {
+            startSyncPolling(4000);
+          }
         }
+
         // Si el chat abierto recibió nuevos mensajes o completó descargas multimedia, refrescarlo sin perder la posición de lectura
         if ((messagesChanged || mediaChanged) && selectedChatId) {
           await refreshActiveChatSilently();
         }
       } catch (e) {
-        document.getElementById('syncStatusText').textContent = 'Desconectado';
+        console.error('Error al actualizar estado:', e);
+        const syncStatusEl = document.getElementById('syncStatusText');
+        if (syncStatusEl) syncStatusEl.textContent = 'Desconectado';
       }
     }
 
@@ -1153,14 +1218,22 @@ HTML_UI = """<!DOCTYPE html>
     }
 
     async function loadChats() {
-      const res = await fetch('/api/chats');
-      allChats = await res.json();
-      if (document.getElementById('searchInput').value.trim()) {
-        handleSearchInput();
-      } else {
-        renderChats(allChats);
+      try {
+        const prevCount = allChats ? allChats.length : 0;
+        const res = await fetch('/api/chats');
+        allChats = await res.json();
+        if (document.getElementById('searchInput') && document.getElementById('searchInput').value.trim()) {
+          handleSearchInput();
+        } else {
+          renderChats(allChats);
+        }
+        updateEmptyState();
+        if (prevCount === 0 && allChats && allChats.length > 0) {
+          showToast('¡WhatsApp Web sincronizado con éxito! Conversaciones listas.');
+        }
+      } catch (e) {
+        console.error('Error cargando chats:', e);
       }
-      updateEmptyState();
     }
 
     function updateEmptyState() {
@@ -1203,6 +1276,11 @@ HTML_UI = """<!DOCTYPE html>
                 </div>
               </div>
             </div>
+
+            <div class="onboarding-live-status">
+              <span class="live-pulse-dot"></span>
+              <span>Esperando primera sincronización desde WhatsApp Web... La pantalla se actualizará automáticamente sin recargar.</span>
+            </div>
           </div>
         `;
         fetchExtensionPath();
@@ -1212,6 +1290,10 @@ HTML_UI = """<!DOCTYPE html>
           <p>Selecciona una conversación a la izquierda o utiliza el buscador indexado de texto completo.</p>
           <p id="dbStatsText" style="margin-top: 14px; font-size: 13px; color: var(--text-time);"></p>
         `;
+        const statsEl = document.getElementById('dbStatsText');
+        if (statsEl && lastSyncData && lastSyncData.total_messages !== undefined) {
+          statsEl.textContent = `Base de datos: ${(lastSyncData.total_messages || 0).toLocaleString()} mensajes | ${lastSyncData.total_chats || 0} chats | ${lastSyncData.downloaded_media || 0} archivos multimedia (${lastSyncData.pending_media || 0} en cola)`;
+        }
       }
     }
 
